@@ -6,16 +6,16 @@ from collections import defaultdict
 from typing import Set, List, Dict
 
 # ────────────────────────────────────────────────
-# 頁面設定 - 美化主題
+# 页面设置 - 美化主题
 # ────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Polymarket vs Probable 市場比對工具",
+    page_title="Polymarket vs Probable 市场对比工具",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 自訂 CSS 美化（讓 expander、表格更漂亮）
+# 自定义 CSS 美化
 st.markdown("""
     <style>
     .stExpander {
@@ -39,15 +39,15 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 Polymarket vs Probable 相同市場名稱比對工具")
-st.markdown("自動找出兩個平台完全相同的市場，並將變體（金額/日期/時間不同）歸類顯示")
+st.title("📊 Polymarket vs Probable 相同市场名称对比工具")
+st.markdown("自动找出两个平台完全相同的市场，并将变体（金额/日期/时间不同）归类显示")
 
 # ────────────────────────────────────────────────
 # Polymarket 拉取
 # ────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def get_polymarket_questions() -> Set[str]:
-    with st.spinner("正在從 Polymarket 拉取市場資料..."):
+    with st.spinner("正在从 Polymarket 拉取市场数据..."):
         base_url = "https://gamma-api.polymarket.com/markets"
         params = {"active": "true", "closed": "false", "limit": 1000, "offset": 0}
         questions: Set[str] = set()
@@ -64,7 +64,7 @@ def get_polymarket_questions() -> Set[str]:
                         questions.add(q)
                 params["offset"] += params["limit"]
             except Exception as e:
-                st.error(f"Polymarket 拉取失敗：{e}")
+                st.error(f"Polymarket 拉取失败：{e}")
                 return set()
         return questions
 
@@ -73,7 +73,7 @@ def get_polymarket_questions() -> Set[str]:
 # ────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def get_probable_questions() -> Set[str]:
-    with st.spinner("正在從 Probable 拉取市場資料..."):
+    with st.spinner("正在从 Probable 拉取市场数据..."):
         base_url = "https://market-api.probable.markets/public/api/v1/markets/"
         questions: Set[str] = set()
         page = 1
@@ -96,12 +96,12 @@ def get_probable_questions() -> Set[str]:
                     break
                 page += 1
             except Exception as e:
-                st.error(f"Probable 拉取失敗：{e}")
+                st.error(f"Probable 拉取失败：{e}")
                 return set()
         return questions
 
 # ────────────────────────────────────────────────
-# 字符串清理 → 分組 key
+# 字符串清理 → 分组 key
 # ────────────────────────────────────────────────
 def clean_for_grouping(q: str) -> str:
     q = q.lower().strip()
@@ -126,35 +126,35 @@ def group_by_cleaned_key(questions: List[str]) -> Dict[str, List[str]]:
     return dict(groups)
 
 # ────────────────────────────────────────────────
-# 主邏輯
+# 主逻辑
 # ────────────────────────────────────────────────
-if st.button("開始比對並顯示美化結果（約 10–30 秒）", type="primary", use_container_width=True):
+if st.button("开始对比并显示美化结果（约 10–30 秒）", type="primary", use_container_width=True):
     poly_questions = get_polymarket_questions()
     prob_questions = get_probable_questions()
 
     col1, col2 = st.columns(2)
-    col1.metric("Polymarket 活躍市場", len(poly_questions))
-    col2.metric("Probable 活躍市場", len(prob_questions))
+    col1.metric("Polymarket 活跃市场", len(poly_questions))
+    col2.metric("Probable 活跃市场", len(prob_questions))
 
     common = poly_questions.intersection(prob_questions)
     common_list = list(common)
 
     if common_list:
-        st.success(f"找到 {len(common_list)} 個完全相同的市場，已自動歸類為 {len(groups)} 組")
-
         groups = group_by_cleaned_key(common_list)
 
-        # 統計卡片
-        group_sizes = [len(items) for items in groups.values()]
-        st.subheader("總結統計")
-        cols = st.columns(3)
-        cols[0].metric("總組數", len(groups))
-        cols[1].metric("最大組變體數", max(group_sizes) if group_sizes else 0)
-        cols[2].metric("平均變體數/組", round(sum(group_sizes)/len(groups), 1) if groups else 0)
+        st.success(f"找到 {len(common_list)} 个完全相同的市场，已自动归类为 {len(groups)} 组")
 
-        st.subheader("歸類結果（只顯示 ≥2 個變體的組）")
+        # 统计卡片
+        group_sizes = [len(items) for items in groups.values()]
+        st.subheader("总结统计")
+        cols = st.columns(3)
+        cols[0].metric("总组数", len(groups))
+        cols[1].metric("最大组变体数", max(group_sizes) if group_sizes else 0)
+        cols[2].metric("平均变体数/组", round(sum(group_sizes)/len(groups), 1) if groups else 0)
+
+        st.subheader("归类结果（只显示 ≥2 个变体的组）")
         
-        # 逐組顯示卡片
+        # 逐组显示卡片
         for key, items in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True):
             if len(items) < 2:
                 continue
@@ -162,35 +162,35 @@ if st.button("開始比對並顯示美化結果（約 10–30 秒）", type="pri
             with st.container():
                 st.markdown(f'<div class="card">', unsafe_allow_html=True)
                 
-                # 標題行
+                # 标题行
                 title_cols = st.columns([5, 2])
                 with title_cols[0]:
-                    st.markdown(f"**組：{key or '其他核心描述'}**")
+                    st.markdown(f"**组：{key or '其他核心描述'}**")
                 with title_cols[1]:
                     size = len(items)
                     if size >= 6:
-                        st.success(f"{size} 個變體")
+                        st.success(f"{size} 个变体")
                     elif size >= 4:
-                        st.info(f"{size} 個變體")
+                        st.info(f"{size} 个变体")
                     else:
-                        st.warning(f"{size} 個變體")
+                        st.warning(f"{size} 个变体")
 
-                # 表格顯示變體
-                df = pd.DataFrame({"完整市場名稱": sorted(items)})
+                # 表格显示变体
+                df = pd.DataFrame({"完整市场名称": sorted(items)})
                 st.dataframe(
                     df,
                     use_container_width=True,
                     hide_index=True,
-                    column_config={"完整市場名稱": st.column_config.TextColumn(width="large")}
+                    column_config={"完整市场名称": st.column_config.TextColumn(width="large")}
                 )
 
                 st.markdown('</div>', unsafe_allow_html=True)
 
     else:
-        st.warning("目前沒有完全相同的市場名稱。")
+        st.warning("目前没有完全相同的市场名称。")
 
 # ────────────────────────────────────────────────
-# 頁尾
+# 页尾
 # ────────────────────────────────────────────────
 st.markdown("---")
-st.caption("資料來源：Polymarket Gamma API & Probable Market Public API | 快取 5 分鐘 | 如需加入價格或其他功能，請提供下一步需求！")
+st.caption("数据来源：Polymarket Gamma API & Probable Market Public API | 缓存 5 分钟 | 如需加入价格或其他功能，请提供下一步需求！")
