@@ -2,77 +2,80 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-from fuzzywuzzy import fuzz
+from concurrent.futures import ThreadPoolExecutor
+from rapidfuzz import fuzz, process # 换成高性能匹配库
+from datetime import datetime
 
-st.set_page_config(page_title="2026 跨平台对冲神器", layout="wide")
-st.title("🛡️ Polymarket & Probable 真实数据监控")
+st.set_page_config(page_title="2026 极速对冲监控", layout="wide")
+st.title("⚡ Polymarket & Probable 极速监控面板")
 
-# --- 1. 获取 Polymarket 活跃市场 (基于 image_e2ff5d) ---
-def fetch_poly():
+# --- 1. 并发抓取函数 ---
+def fetch_url(url):
     try:
-        url = "https://gamma-api.polymarket.com/markets?active=true&limit=100"
-        resp = requests.get(url, timeout=10).json() # Polymarket 是列表
-        return [{
-            "title": m['question'],
-            "liquidity": float(m.get('liquidity', 0)),
-            "volume": float(m.get('volume', 0)),
-            "tokens": m.get('clobTokenIds', [])
-        } for m in resp if m.get('question')]
-    except: return []
+        return requests.get(url, timeout=5).json()
+    except:
+        return None
 
-# --- 2. 获取 Probable 活跃市场 (基于 image_e2fc97) ---
-def fetch_prob():
-    try:
-        url = "https://market-api.probable.markets/public/api/v1/markets/?active=true&limit=100"
-        resp = requests.get(url, timeout=10).json()
-        markets = resp.get('markets', []) # Probable 嵌套在 markets 键下
-        return [{
-            "title": m['question'],
-            "liquidity": float(m.get('liquidity', 0)),
-            "volume": float(m.get('volume24hr', 0)), # 对应截图字段
-            "tokens": m.get('clobTokenIds', [])
-        } for m in markets if m.get('question')]
-    except: return []
+def get_all_data():
+    urls = [
+        "https://gamma-api.polymarket.com/markets?active=true&limit=100",
+        "https://market-api.probable.markets/public/api/v1/markets/?active=true&limit=100"
+    ]
+    # 使用线程池并发抓取两个 API
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(fetch_url, urls))
+    return results[0], results[1] # 返回 poly_raw, prob_raw
 
-# --- 3. 核心匹配逻辑 (降低精度，增加模糊度) ---
-def analyze(fuzz_score):
-    poly = fetch_poly()
-    prob = fetch_prob()
+# --- 2. 高性能处理逻辑 ---
+def fast_analyze(fuzz_threshold):
+    poly_raw, prob_raw = get_all_data()
     
-    # 调试信息：显示在网页上，方便您确认是否抓到了标题
-    st.sidebar.write(f"Poly 市场总数: {len(poly)}")
-    st.sidebar.write(f"Prob 市场总数: {len(prob)}")
-    
+    if not poly_raw or not prob_raw:
+        return pd.DataFrame()
+
+    # 数据格式标准化 (基于 image_e2ff5d 和 image_e2fc97)
+    poly_list = [{"title": m['question'], "liq": float(m.get('liquidity', 0))} for m in poly_raw if m.get('question')]
+    # Probable 数据包裹在 markets 键下
+    prob_list = [{"title": m['question'], "liq": float(m.get('liquidity', 0))} for m in prob_raw.get('markets', []) if m.get('question')]
+
+    st.sidebar.write(f"Poly: {len(poly_list)} | Prob: {len(prob_list)}")
+
     matches = []
-    for p in poly:
-        for b in prob:
-            # 标题模糊匹配
-            score = fuzz.token_set_ratio(p['title'], b['title'])
-            if score >= fuzz_score:
-                matches.append({
-                    "Poly 标题": p['title'],
-                    "Prob 标题": b['title'],
-                    "匹配度": score,
-                    "深度(Poly)": p['liquidity'],
-                    "深度(Prob)": b['liquidity'],
-                    "总交易量": p['volume'] + b['volume']
-                })
+    # 提取所有标题进行批量匹配
+    prob_titles = [m['title'] for m in prob_list]
+    
+    for p in poly_list:
+        # 使用 rapidfuzz 的 extractOne 进行快速检索
+        best_match = process.extractOne(p['title'], prob_titles, scorer=fuzz.token_set_ratio)
+        
+        if best_match and best_match[1] >= fuzz_threshold:
+            b = prob_list[best_match[2]] # 获取匹配到的 Prob 市场对象
+            matches.append({
+                "市场名称": p['title'],
+                "匹配得分": round(best_match[1], 1),
+                "深度(Poly)": p['liq'],
+                "深度(Prob)": b['liq'],
+                "更新时间": datetime.now().strftime("%H:%M:%S")
+            })
+            
     return pd.DataFrame(matches)
 
-# --- 4. 网页界面 ---
-st.sidebar.header("调优参数")
-fuzz_val = st.sidebar.slider("标题匹配精度 (建议 65-80)", 50, 95, 70)
+# --- 3. 界面显示 ---
+st.sidebar.header("性能控制")
+fuzz_score = st.sidebar.slider("匹配精度", 50, 95, 70)
 
 placeholder = st.empty()
 while True:
-    df = analyze(fuzz_val)
+    start_time = time.time()
+    df = fast_analyze(fuzz_score)
+    duration = time.time() - start_time
+    
     with placeholder.container():
+        st.write(f"⏱️ 本轮扫描耗时: {duration:.2f} 秒") # 监控速度提升
         if not df.empty:
-            # 排序：深度优先
-            df_sorted = df.sort_values(by="深度(Poly)", ascending=False)
-            st.success(f"成功匹配到 {len(df_sorted)} 个共同市场！")
-            st.dataframe(df_sorted, use_container_width=True)
+            st.dataframe(df.sort_values(by="深度(Poly)", ascending=False), use_container_width=True)
         else:
-            st.info("正在深度扫描两个平台的市场，请稍候...")
-    time.sleep(30)
+            st.info("扫描中，未发现重合市场...")
+            
+    time.sleep(10) # 速度提升后，刷新频率可以更高
     st.rerun()
