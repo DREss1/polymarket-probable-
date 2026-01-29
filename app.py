@@ -1,107 +1,78 @@
-import streamlit as st
-import pandas as pd
 import requests
-import time
-import re
-from datetime import datetime
+from typing import Set
 
-# --- 1. 基础配置与 API ---
-st.set_page_config(page_title="2026 聚合监控终端", layout="wide")
-st.title("⚖️ 跨平台活跃市场监控 (全量扫描/聚合对比版)")
+# Polymarket: 获取 question set
+def get_polymarket_questions() -> Set[str]:
+    base_url = "https://gamma-api.polymarket.com/markets"
+    params = {"active": "true", "closed": "false", "limit": 1000, "offset": 0}
+    questions: Set[str] = set()
+    while True:
+        resp = requests.get(base_url, params=params, timeout=10)
+        if resp.status_code != 200:
+            print(f"Polymarket error {resp.status_code}: {resp.text}")
+            break
+        data = resp.json()
+        if not isinstance(data, list) or not data:
+            break
+        for market in data:
+            q = market.get("question", "").strip().lower()
+            if q:
+                questions.add(q)
+        params["offset"] += params["limit"]
+    print(f"Polymarket 活跃市场数量: {len(questions)}")
+    return questions
 
-POLY_GAMMA = "https://gamma-api.polymarket.com"
-PROB_API = "https://market-api.probable.markets/public/api/v1"
-
-# --- 2. 核心抓取：地毯式穷尽抓取 (覆盖 1000+ 市场) ---
-def fetch_all_markets():
-    poly_db = {}
-    prob_db = {}
-    status = st.sidebar.empty()
-
-    # A. 抓取 Polymarket (扫描 10 页，确保找回失踪市场)
-    for i in range(10):
-        status.text(f"读取 Polymarket 第 {i+1} 页...")
-        url = f"{POLY_GAMMA}/markets?active=true&closed=false&limit=100&offset={i*100}"
+# Probable: 获取 question set（使用 markets 端点）
+def get_probable_questions() -> Set[str]:
+    base_url = "https://market-api.probable.markets/public/api/v1/markets/"
+    questions: Set[str] = set()
+    page = 1
+    limit = 100  # 最大100
+    while True:
+        params = {"page": page, "limit": limit, "active": "true"}
+        # 可选加: "closed": "false" 如果需要严格活跃
+        resp = requests.get(base_url, params=params, timeout=10)
+        if resp.status_code != 200:
+            print(f"Probable markets error {resp.status_code}: {resp.text}")
+            break
         try:
-            r = requests.get(url, timeout=10).json()
-            if not r: break
-            for m in r:
-                title = m.get('question', '').strip()
-                if title:
-                    # 记录价格与 slug (用于辅助识别)
-                    poly_db[title] = float(m.get('best_yes_price', 0))
-            time.sleep(0.1) 
-        except: break
+            data = resp.json()
+        except ValueError:
+            print("Probable invalid JSON")
+            break
 
-    # B. 抓取 Probable (同步扫描 10 页)
-    for i in range(1, 11):
-        status.text(f"读取 Probable 第 {i} 页...")
-        url = f"{PROB_API}/markets/?active=true&closed=false&limit=100&page={i}"
-        try:
-            r = requests.get(url, timeout=10).json()
-            markets = r.get('markets', [])
-            if not markets: break
-            for m in markets:
-                title = m.get('question', '').strip()
-                if title:
-                    prob_db[title] = float(m.get('yes_price', 0))
-        except: break
+        markets = data.get("markets", [])
+        pagination = data.get("pagination", {})
 
-    status.success("全量数据同步完成！")
-    return poly_db, prob_db
+        for market in markets:
+            q = market.get("question", "").strip().lower()
+            if q:
+                questions.add(q)
 
-# --- 3. 智能聚合逻辑：将 >$2B, >$6B 等归入同一个父事件 ---
-def group_matches(poly_db, prob_db, keyword):
-    # 找出标题完全一致的市场
-    common_titles = set(poly_db.keys()).intersection(set(prob_db.keys()))
-    
-    # 提取公共主干：去除标题末尾的数值和符号，用于分组
-    def get_event_stem(title):
-        # 匹配诸如 >$2B, >6B, 80,000 等数值后缀并替换，提取核心语义
-        stem = re.sub(r'([><]?\$?\d+[\d,.]*\w*)\b', '[数值]', title)
-        return stem
+        if not pagination.get("hasMore", False):
+            break
+        page += 1
 
-    groups = {}
-    for title in common_titles:
-        # 关键词过滤
-        if keyword and keyword.lower() not in title.lower():
-            continue
-            
-        stem = get_event_stem(title)
-        if stem not in groups: groups[stem] = []
-        
-        # 识别该选项具体是什么（如 >$2B）
-        option_detail = title.replace(stem.replace('[数值]', ''), '').strip()
-        if not option_detail: option_detail = "主选项"
+    print(f"Probable 活跃市场数量: {len(questions)}")
+    return questions
 
-        groups[stem].append({
-            "选项详情": title, # 这里保留完整标题以便你查阅
-            "Polymarket 价格": f"${poly_db[title]:.3f}",
-            "Probable 价格": f"${prob_db[title]:.3f}",
-            "实时价差": round(abs(poly_db[title] - prob_db[title]), 4)
-        })
-    
-    return groups
+# 比较
+poly_questions = get_polymarket_questions()
+prob_questions = get_probable_questions()
 
-# --- 4. 界面渲染 ---
-st.sidebar.header("🔍 监控配置")
-kw = st.sidebar.text_input("搜索关键词 (如 MegaETH)", "")
-if st.sidebar.button("🚀 启动全量聚合扫描"):
-    st.write(f"⏰ **数据同步时间: {datetime.now().strftime('%H:%M:%S')}**")
-    
-    p_db, b_db = fetch_all_markets()
-    grouped_results = group_matches(p_db, b_db, kw)
-    
-    if grouped_results:
-        # 修正后的变量名：sorted_stems
-        sorted_stems = sorted(grouped_results.keys())
-        
-        for stem in sorted_stems: # 确保这里与定义的变量名一致
-            # 渲染聚合折叠框
-            display_name = stem.replace('[数值]', '...')
-            with st.expander(f"📦 聚合事件：{display_name}", expanded=True):
-                # 将该组下的所有选项转为表格
-                df = pd.DataFrame(grouped_results[stem]).sort_values(by="选项详情")
-                st.table(df)
-    else:
-        st.warning("地毯式扫描已完成，但未发现标题完全一致的对冲市场。")
+common = poly_questions.intersection(prob_questions)
+
+print(f"\n找到 {len(common)} 个名称完全相同的活跃市场（忽略大小写）：")
+if common:
+    for q in sorted(common):
+        print(f"- {q}")
+else:
+    print("暂无完全匹配的市场。建议添加模糊匹配（例如使用 rapidfuzz 库）。")
+
+# 可选：如果想模糊匹配，安装 rapidfuzz 后加这段
+# from rapidfuzz import fuzz, process
+# for p in poly_questions:
+#     matches = process.extract(p, prob_questions, scorer=fuzz.token_sort_ratio, limit=3)
+#     for match, score in matches:
+#         if score > 85:
+#             print(f"相似匹配 ({score}%): {p} → {match}")
