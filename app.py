@@ -2,122 +2,113 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-from rapidfuzz import fuzz, process
-from datetime import datetime, timezone
+from datetime import datetime
 
-# --- 1. 基础配置与安全频率 ---
-st.set_page_config(page_title="2026 跨平台对冲终端", layout="wide")
-st.title("🏹 跨平台“双引擎”实时监控对齐系统")
+# --- 1. 基础配置与 API 终点 ---
+st.set_page_config(page_title="2026 相同标题市场扫描器", layout="wide")
+st.title("⚖️ 跨平台“相同标题”市场实时对冲监控")
 
-# 平台 API 终点
+# 平台 API 地址
 POLY_GAMMA = "https://gamma-api.polymarket.com"
-POLY_CLOB = "https://clob.polymarket.com"
 PROB_API = "https://market-api.probable.markets/public/api/v1"
 
-# --- 2. 核心逻辑：获取实时深度与价格 ---
-def get_live_depth(token_id, platform="poly"):
-    """实时抓取订单簿并计算 1% 滑点深度"""
+# --- 2. 核心抓取逻辑：寻找正在活跃的市场 ---
+def fetch_active_markets():
+    """
+    抓取两个平台所有状态为 active 且未结算的市场
+    """
+    poly_std = []
+    prob_std = []
+
+    # A. 抓取 Polymarket 活跃市场
     try:
-        url = f"{POLY_CLOB}/book?token_id={token_id}" if platform == "poly" else f"{PROB_API}/book?token_id={token_id}"
-        r = requests.get(url, timeout=3).json()
-        levels = r.get('asks', []) # 刷量买入看卖单
-        if not levels: return 0.5, 0.0
-        
-        best_price = float(levels[0]['price'])
-        limit = best_price * 1.01 # 锁定 1% 滑点
-        total_depth = sum(float(l['price']) * float(l['size']) for l in levels if float(l['price']) <= limit)
-        return best_price, round(total_depth, 2)
-    except: return 0.5, 0.0
-
-# --- 3. 核心对齐引擎：ID + 标题双重校验 ---
-def sync_engine(kw, fuzz_threshold):
-    now_utc = datetime.now(timezone.utc)
-    
-    # A. 抓取 Polymarket (全量活跃)
-    poly_markets = []
-    try:
-        # 扫描前 200 个市场以覆盖 2026 最新热门
-        for off in [0, 100]:
-            r = requests.get(f"{POLY_GAMMA}/markets?active=true&closed=false&limit=100&offset={off}").json()
-            poly_markets.extend([m for m in r if float(m.get('liquidity', 0)) > 100])
-    except: pass
-
-    # B. 抓取 Probable (全量活跃)
-    prob_markets = []
-    try:
-        r = requests.get(f"{PROB_API}/markets/?active=true&closed=false&limit=100").json()
-        prob_markets = r.get('markets', [])
-    except: pass
-
-    # C. 混合对齐逻辑
-    matches = []
-    prob_id_map = {m['condition_id']: m for m in prob_markets if m.get('condition_id')}
-    prob_titles = [m['question'] for m in prob_markets]
-
-    for p in poly_markets:
-        # 关键词过滤提速
-        if kw and kw.lower() not in p['question'].lower(): continue
-        
-        target_prob = None
-        # 方式 1: ID 精准匹配 (Hex ID)
-        if p.get('conditionId') in prob_id_map:
-            target_prob = prob_id_map[p['conditionId']]
-        # 方式 2: 标题模糊匹配 (解决你手动能看到但 ID 没对上的问题)
-        else:
-            best = process.extractOne(p['question'], prob_titles, scorer=fuzz.token_set_ratio)
-            if best and best[1] >= fuzz_threshold:
-                target_prob = prob_markets[best[2]]
-
-        if target_prob:
-            # 提取代币 ID 进行价格与深度查询
-            p_token = p['clobTokenIds'][0] if p.get('clobTokenIds') else ""
-            b_token = target_prob['clobTokenIds'][0] if target_prob.get('clobTokenIds') else ""
-            
-            p_price, p_depth = get_live_depth(p_token, "poly")
-            b_price, b_depth = get_live_depth(b_token, "prob")
-            
-            cost = p_price + (1 - b_price)
-            matches.append({
-                "市场名称": p['question'],
-                "对冲成本": round(cost, 4),
-                "深度 (Poly/Prob)": f"${p_depth:,.0f} / ${b_depth:,.0f}",
-                "对齐方式": "ID 匹配" if p.get('conditionId') == target_prob.get('condition_id') else "标题对齐",
-                "Poly 链接": f"https://polymarket.com/event/{p['slug']}",
-                "Prob 链接": f"https://probable.markets/markets/{target_prob['market_slug']}?id={target_prob['id']}"
+        # 使用 active=true 和 closed=false 过滤
+        url = f"{POLY_GAMMA}/markets?active=true&closed=false&limit=100"
+        r = requests.get(url, timeout=10).json()
+        for m in r:
+            poly_std.append({
+                "标题": m.get('question', '').strip(),
+                "Poly价格": float(m.get('best_yes_price', 0)),
+                "链接": f"https://polymarket.com/event/{m.get('slug')}"
             })
-    return pd.DataFrame(matches), len(poly_markets), len(prob_markets)
+    except: pass
 
-# --- 4. UI 渲染与侧边栏 ---
-st.sidebar.header("⚙️ 2026 监控配置")
-kw = st.sidebar.text_input("1️⃣ 搜索关键词 (如: BTC)", "BTC")
-f_acc = st.sidebar.slider("2️⃣ 标题对齐精度", 40, 95, 75)
-ref_sec = st.sidebar.slider("3️⃣ 刷新周期 (秒)", 60, 300, 180)
+    # B. 抓取 Probable 活跃市场
+    try:
+        url = f"{PROB_API}/markets/?active=true&closed=false&limit=100"
+        r = requests.get(url, timeout=10).json()
+        for m in r.get('markets', []):
+            prob_std.append({
+                "标题": m.get('question', '').strip(),
+                "Prob价格": float(m.get('yes_price', 0)),
+                "链接": f"https://probable.markets/markets/{m.get('market_slug')}?id={m.get('id')}"
+            })
+    except: pass
 
-# 实时同步状态栏
-status_placeholder = st.empty()
-table_placeholder = st.empty()
+    return poly_std, prob_std
+
+# --- 3. 匹配与排序逻辑 ---
+def get_matched_df(keyword):
+    p_markets, b_markets = fetch_active_markets()
+    
+    # 转换为字典，以标题为键，方便快速匹配
+    p_dict = {m['标题']: m for m in p_markets}
+    b_dict = {m['标题']: m for m in b_markets}
+
+    matched_results = []
+
+    # 寻找标题完全一致的市场
+    for title, p_data in p_dict.items():
+        if title in b_dict:
+            b_data = b_dict[title]
+            
+            # 关键词过滤功能
+            if keyword and keyword.lower() not in title.lower():
+                continue
+                
+            matched_results.append({
+                "市场标题": title,
+                "Polymarket 实时价": f"${p_data['Poly价格']:.3f}",
+                "Probable 实时价": f"${b_data['Prob价格']:.3f}",
+                "价差": round(abs(p_data['Poly价格'] - b_data['Prob价格']), 4),
+                "Poly直达": p_data['链接'],
+                "Prob直达": b_data['链接']
+            })
+
+    # 将结果转换为 DataFrame 并按标题排序 [针对需求 2]
+    df = pd.DataFrame(matched_results)
+    if not df.empty:
+        df = df.sort_values(by="市场标题", ascending=True)
+    return df
+
+# --- 4. 界面渲染 ---
+st.sidebar.header("🔍 搜索配置")
+search_kw = st.sidebar.text_input("输入标题关键词", "")
+refresh_sec = st.sidebar.slider("自动刷新周期 (秒)", 30, 300, 60)
+
+status = st.empty()
+table = st.empty()
 
 while True:
-    df, p_count, b_count = sync_engine(kw, f_acc)
+    with status:
+        st.write(f"🔄 正在同步全量活跃市场... 当前时间: {datetime.now().strftime('%H:%M:%S')}")
     
-    with status_placeholder.container():
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Poly 活跃市场", p_count)
-        c2.metric("Prob 活跃市场", b_count)
-        c3.metric("成功对齐", len(df))
-        st.write(f"✅ 最后同步: {datetime.now().strftime('%H:%M:%S')}")
-
-    with table_placeholder.container():
-        if not df.empty:
+    df_final = get_matched_df(search_kw)
+    
+    with table.container():
+        if not df_final.empty:
+            st.success(f"✅ 成功找到 {len(df_final)} 个标题完全相同的活跃市场")
             st.dataframe(
-                df.style.highlight_between(left=0.0, right=1.0, subset=['对冲成本'], color='#D4EDDA'),
+                df_final,
                 column_config={
-                    "Poly 链接": st.column_config.LinkColumn("直达"),
-                    "Prob 链接": st.column_config.LinkColumn("直达")
-                }, use_container_width=True, hide_index=True
+                    "Poly直达": st.column_config.LinkColumn("交易链接"),
+                    "Prob直达": st.column_config.LinkColumn("交易链接")
+                },
+                use_container_width=True,
+                hide_index=True
             )
         else:
-            st.warning(f"当前搜索 '{kw}' 下未发现对齐市场。尝试调低‘标题对齐精度’。")
-            
-    time.sleep(ref_sec) # 遵循 Probable 3分钟缓存政策
+            st.warning("⚠️ 目前未在两平台发现标题完全一致的活跃市场，请尝试更换关键词。")
+
+    time.sleep(refresh_sec)
     st.rerun()
