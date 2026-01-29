@@ -2,100 +2,77 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-from concurrent.futures import ThreadPoolExecutor
 from rapidfuzz import fuzz, process
-from datetime import datetime
+from datetime import datetime, timezone
 
-# --- 1. 基础配置 ---
-st.set_page_config(page_title="2026 全量监控-稳定版", layout="wide")
-st.title("🏹 跨平台全量对冲监控 (稳定版)")
+st.set_page_config(page_title="2026 纯净对冲", layout="wide")
+st.title("🛡️ 跨平台实时监控 (已开启 2026 深度过滤)")
 
-# 侧边栏配置：先渲染，避免白屏
-st.sidebar.header("🎯 扫描配置")
-kw = st.sidebar.text_input("关键词过滤 (如 BTC)", "BTC")
-f_val = st.sidebar.slider("对齐精度", 40, 95, 70)
-slip_val = st.sidebar.slider("允许滑点 (%)", 0.1, 5.0, 1.0)
-
-# --- 2. 增强型抓取函数 ---
-def fetch_poly_exhaustive():
-    all_data = []
-    offset = 0
-    # 限制最大扫描 1500 个，平衡速度与深度
-    while offset < 1500:
-        url = f"https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&offset={offset}"
-        try:
-            resp = requests.get(url, timeout=10).json()
-            if not resp: break
-            # 过滤掉已结算或无深度的僵尸市场
-            valid = [m for m in resp if float(m.get('liquidity', 0)) > 100]
-            all_data.extend(valid)
-            offset += 100
-            time.sleep(0.1) # 频率保护
-        except: break
-    return all_data
-
-def fetch_prob_exhaustive():
-    try:
-        url = "https://market-api.probable.markets/public/api/v1/markets/?active=true&closed=false&limit=100"
-        resp = requests.get(url, timeout=10).json()
-        # Probable 数据在 markets 键下
-        return [m for m in resp.get('markets', []) if float(m.get('liquidity', 0)) > 50]
-    except: return []
-
-# --- 3. 核心计算逻辑 ---
-def get_analysis():
-    # 使用 Spinner 解决白屏焦虑
-    with st.spinner('正在同步全球预测市场全量数据...'):
-        poly_raw = fetch_poly_exhaustive()
-        prob_raw = fetch_prob_exhaustive()
-        
-        if not poly_raw or not prob_raw:
-            return pd.DataFrame()
-
-        # 标准化字段
-        p_list = [{"title": m['question'], "yes": float(m.get('best_yes_price', 0.5)), 
-                   "slug": m.get('slug'), "liq": float(m.get('liquidity', 0))} for m in poly_raw]
-        b_list = [{"title": m['question'], "yes": float(m.get('yes_price', 0.5)), 
-                   "slug": m.get('market_slug'), "liq": float(m.get('liquidity', 0))} for m in prob_raw]
-
-        if kw:
-            p_list = [m for m in p_list if kw.lower() in m['title'].lower()]
-            b_list = [m for m in b_list if kw.lower() in m['title'].lower()]
-
-        results = []
-        b_titles = [m['title'] for m in b_list]
-        for p in p_list:
-            if not b_titles: break
-            best = process.extractOne(p['title'], b_titles, scorer=fuzz.token_set_ratio)
-            if best and best[1] >= f_val:
-                b = b_list[best[2]]
-                cost = p['yes'] + (1 - b['yes'])
-                results.append({
-                    "市场": p['title'],
-                    "成本": round(cost, 4),
-                    "收益率": f"{(1-cost)*100:.2f}%",
-                    "Poly深度": f"${p['liq']:,.0f}",
-                    "去Poly": f"https://polymarket.com/event/{p['slug']}",
-                    "去Prob": f"https://probable.markets/markets/{b['slug']}"
-                })
-        return pd.DataFrame(results)
-
-# --- 4. 运行与刷新 ---
-placeholder = st.empty()
-while True:
-    df = get_analysis()
-    with placeholder.container():
-        if not df.empty:
-            st.success(f"同步完成！检测到 {len(df)} 个潜在对冲机会")
-            st.dataframe(
-                df.style.highlight_between(left=0.95, right=1.0, subset=['成本'], color='#D4EDDA'),
-                column_config={
-                    "去Poly": st.column_config.LinkColumn("交易"),
-                    "去Prob": st.column_config.LinkColumn("交易")
-                }, use_container_width=True, hide_index=True
-            )
-        else:
-            st.warning("当前筛选条件下未发现活跃对冲机会，请尝试更换关键词。")
+# --- 1. 核心过滤逻辑：剔除 2020/2021 僵尸市场 ---
+def is_live_2026(m):
+    """
+    强制要求市场必须是 2026 年且有真金白银的深度
+    """
+    # 规则 1：必须有流动性 (过滤 404 僵尸市场)
+    liq = float(m.get('liquidity', 0))
+    if liq < 200: return False # 低于 200 刀的直接不要
     
-    time.sleep(180) # 配合 Probable 3分钟缓存政策
-    st.rerun()
+    # 规则 2：强制时间校验 (排除 2020 年陈旧数据)
+    now = datetime.now(timezone.utc)
+    end_str = m.get('endDate') or m.get('end_date')
+    if end_str:
+        try:
+            end_date = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+            if end_date < now: return False # 已结束的不要
+        except: pass
+    return True
+
+# --- 2. 抓取与链接修正 ---
+def fetch_data():
+    # 抓取 Poly (强制 closed=false 获取当前)
+    poly_raw = requests.get("https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100").json()
+    poly_active = [m for m in poly_raw if is_live_2026(m)]
+
+    # 抓取 Prob (基于 image_e36594)
+    prob_resp = requests.get("https://market-api.probable.markets/public/api/v1/markets/?active=true&limit=100").json()
+    prob_active = [m for m in prob_resp.get('markets', []) if is_live_2026(m)]
+
+    return poly_active, prob_active
+
+# --- 3. 匹配逻辑 ---
+def run():
+    poly, prob = fetch_data()
+    st.sidebar.write(f"2026 活跃市场 - Poly: {len(poly)} | Prob: {len(prob)}")
+    
+    results = []
+    if poly and prob:
+        prob_titles = [m['question'] for m in prob]
+        for p in poly:
+            # 提高匹配门槛到 80，防止误配
+            best = process.extractOne(p['question'], prob_titles, scorer=fuzz.token_set_ratio)
+            if best and best[1] >= 80:
+                b = prob[best[2]]
+                cost = float(p['best_yes_price']) + (1 - float(b['yes_price']))
+                
+                # 链接修正：Probable 链接通常需要带上具体的 ID
+                results.append({
+                    "市场名称": p['question'],
+                    "收益率": f"{(1-cost)*100:.2f}%",
+                    "Poly 链接": f"https://polymarket.com/event/{p['slug']}",
+                    "Prob 链接": f"https://probable.markets/markets/{b['market_slug']}?id={b['id']}",
+                    "更新时间": datetime.now().strftime("%H:%M")
+                })
+    return pd.DataFrame(results)
+
+# --- UI 渲染 ---
+df = run()
+if not df.empty:
+    st.dataframe(df, column_config={
+        "Poly 链接": st.column_config.LinkColumn("直达 Poly"),
+        "Prob 链接": st.column_config.LinkColumn("直达 Prob")
+    }, use_container_width=True)
+else:
+    st.info("正在地毯式搜寻 2026 年真实活跃市场...")
+
+time.sleep(180)
+st.rerun()
