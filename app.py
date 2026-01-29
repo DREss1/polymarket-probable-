@@ -100,6 +100,7 @@ def clean_for_grouping(q: str) -> str:
     q = re.sub(r'\s+', ' ', q).strip(' -(),')
     return q if q else "uncategorized"
 
+
 def group_by_cleaned_key(questions: List[str]) -> Dict[str, List[str]]:
     groups = defaultdict(list)
     for q in sorted(questions):
@@ -108,7 +109,7 @@ def group_by_cleaned_key(questions: List[str]) -> Dict[str, List[str]]:
     return dict(groups)
 
 # ────────────────────────────────────────────────
-# 使用 session_state 持久化数据（防止滑块重跑时丢失）
+# 使用 session_state 持久化数据
 # ────────────────────────────────────────────────
 if 'common_list' not in st.session_state:
     st.session_state.common_list = []
@@ -155,10 +156,10 @@ if st.session_state.common_list:
     min_variants = st.slider("显示组的最小变体数（1=显示所有组，包括单体）", min_value=1, max_value=10, value=2, step=1)
 
     st.subheader("归类结果")
-    for key, items in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True):
-        if len(items) < min_variants:
-            continue
 
+    # 过滤显示：只显示变体数 >= min_variants 的组
+    filtered_groups = {k: v for k, v in groups.items() if len(v) >= min_variants}
+    for key, items in sorted(filtered_groups.items(), key=lambda x: len(x[1]), reverse=True):
         with st.container():
             st.markdown(f'<div class="card">', unsafe_allow_html=True)
             title_cols = st.columns([5, 2])
@@ -178,15 +179,16 @@ if st.session_state.common_list:
 
             st.markdown('</div>', unsafe_allow_html=True)
 
-    # 单体组折叠
-    single_groups = {k: v for k, v in groups.items() if len(v) == 1}
-    if single_groups:
-        with st.expander(f"单体市场组（每个组仅1个市场，共 {len(single_groups)} 个）", expanded=False):
-            all_singles = [item for items in single_groups.values() for item in items]
-            df_singles = pd.DataFrame({"市场名称": sorted(all_singles)})
-            st.dataframe(df_singles, use_container_width=True, hide_index=True)
+    # 如果 min_variants == 1，才显示单体组 expander（否则隐藏）
+    if min_variants == 1:
+        single_groups = {k: v for k, v in groups.items() if len(v) == 1}
+        if single_groups:
+            with st.expander(f"单体市场组（每个组仅1个市场，共 {len(single_groups)} 个）", expanded=False):
+                all_singles = [item for items in single_groups.values() for item in items]
+                df_singles = pd.DataFrame({"市场名称": sorted(all_singles)})
+                st.dataframe(df_singles, use_container_width=True, hide_index=True)
 
-# 模糊搜索结果（独立于按钮，实时响应）
+# 模糊搜索结果（独立实时显示）
 if search_query and 'common_list' in st.session_state and st.session_state.common_list:
     search_query_lower = search_query.lower()
     matched = [q for q in st.session_state.common_list if search_query_lower in q]
