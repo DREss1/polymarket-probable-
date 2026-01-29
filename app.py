@@ -101,23 +101,20 @@ def get_probable_questions() -> Set[str]:
         return questions
 
 # ────────────────────────────────────────────────
-# 调整后的字符串清理 → 分组 key（保留核心动作词，如 'launch a token'、'fdv above'）
+# 字符串清理 → 分组 key
 # ────────────────────────────────────────────────
 def clean_for_grouping(q: str) -> str:
     q = q.lower().strip()
-    # 移除结尾问号和 'will ' 前缀
     q = re.sub(r'\?$', '', q)
     q = re.sub(r'^will\s+', '', q, flags=re.IGNORECASE)
-    # 移除具体变量：金额、日期/时间段、'one day after launch' 等
     q = re.sub(r'\$\d+(?:\.\d+)?[mkb]?', '', q, flags=re.IGNORECASE)
     q = re.sub(r'\bone day after launch\b', '', q, flags=re.IGNORECASE)
     patterns = [
-        r'\b(by|before|end of|signed by|settle at -|market cap / fdv >)\b\s*[\w\s\d,:\-]*',  # 移除后缀变量
-        r'\b(march|december|january|super bowl lx|2026|2027|fifa world cup|gta vi)\b\s*[\w\s\d,]*',  # 移除日期/事件
+        r'\b(by|before|end of|signed by|settle at -|market cap / fdv >)\b\s*[\w\s\d,:\-]*',
+        r'\b(march|december|january|super bowl lx|2026|2027|fifa world cup|gta vi)\b\s*[\w\s\d,]*',
     ]
     for pat in patterns:
         q = re.sub(pat, '', q, flags=re.IGNORECASE)
-    # 清理多余空格、标点
     q = re.sub(r'\s+', ' ', q).strip(' -(),')
     return q if q else "uncategorized"
 
@@ -156,11 +153,10 @@ if st.button("开始对比并显示美化结果（约 10–30 秒）", type="pri
         cols[1].metric("最大组变体数", max(group_sizes) if group_sizes else 0)
         cols[2].metric("平均变体数/组", round(sum(group_sizes)/len(groups), 1) if groups else 0)
 
+        # B: 加 UI 开关 - 最小变体数
+        min_variants = st.slider("显示组的最小变体数（1=显示所有组，包括单体）", min_value=1, max_value=10, value=2, step=1)
+
         st.subheader("归类结果")
-        
-        # B: 加 UI 开关，让用户选择最小变体数
-        min_variants = st.slider("显示组的最小变体数", min_value=1, max_value=10, value=2, step=1)
-        
         # 逐组显示卡片（过滤最小变体数）
         for key, items in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True):
             if len(items) < min_variants:
@@ -169,7 +165,6 @@ if st.button("开始对比并显示美化结果（约 10–30 秒）", type="pri
             with st.container():
                 st.markdown(f'<div class="card">', unsafe_allow_html=True)
                 
-                # 标题行
                 title_cols = st.columns([5, 2])
                 with title_cols[0]:
                     st.markdown(f"**组：{key or '其他核心描述'}**")
@@ -182,28 +177,22 @@ if st.button("开始对比并显示美化结果（约 10–30 秒）", type="pri
                     else:
                         st.warning(f"{size} 个变体")
 
-                # 表格显示变体
                 df = pd.DataFrame({"完整市场名称": sorted(items)})
-                st.dataframe(
-                    df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={"完整市场名称": st.column_config.TextColumn(width="large")}
-                )
+                st.dataframe(df, use_container_width=True, hide_index=True, column_config={"完整市场名称": st.column_config.TextColumn(width="large")})
 
                 st.markdown('</div>', unsafe_allow_html=True)
 
-        # C: 单体组单独折叠到一个 expander 里
+        # C: 单体组单独折叠（即使 min_variants=1 也折叠，避免页面过长）
         single_groups = {k: v for k, v in groups.items() if len(v) == 1}
         if single_groups:
-            with st.expander("单体市场组（每个组仅1个市场，共 {} 个）".format(len(single_groups)), expanded=False):
-                all_singles = [item[0] for items in single_groups.values() for item in items]
+            with st.expander(f"单体市场组（每个组仅1个市场，共 {len(single_groups)} 个）", expanded=False):
+                all_singles = [item for items in single_groups.values() for item in items]  # 修正：去掉 [0]，取完整字符串
                 df_singles = pd.DataFrame({"市场名称": sorted(all_singles)})
                 st.dataframe(df_singles, use_container_width=True, hide_index=True)
 
-        # 加模糊搜索功能：搜索市场名称
-        st.subheader("模糊搜索市场")
-        search_query = st.text_input("输入市场名称关键词进行搜索（忽略大小写，支持模糊匹配）")
+        # 模糊搜索：移到顶部（按钮下面）
+        st.subheader("模糊搜索市场（支持实时过滤所有共同市场）")
+        search_query = st.text_input("输入市场名称关键词（忽略大小写，支持模糊匹配）", key="search_input")
         if search_query:
             search_query_lower = search_query.lower()
             matched = [q for q in common_list if search_query_lower in q]
@@ -221,4 +210,4 @@ if st.button("开始对比并显示美化结果（约 10–30 秒）", type="pri
 # 页尾
 # ────────────────────────────────────────────────
 st.markdown("---")
-st.caption("数据来源：Polymarket Gamma API & Probable Market Public API | 缓存 5 分钟 | 如需加入价格或其他功能，请提供下一步需求！")
+st.caption("数据来源：Polymarket Gamma API & Probable Market Public API | 缓存 5 分钟")
