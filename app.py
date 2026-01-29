@@ -156,11 +156,14 @@ if st.button("开始对比并显示美化结果（约 10–30 秒）", type="pri
         cols[1].metric("最大组变体数", max(group_sizes) if group_sizes else 0)
         cols[2].metric("平均变体数/组", round(sum(group_sizes)/len(groups), 1) if groups else 0)
 
-        st.subheader("归类结果（只显示 ≥2 个变体的组）")
+        st.subheader("归类结果")
         
-        # 逐组显示卡片
+        # B: 加 UI 开关，让用户选择最小变体数
+        min_variants = st.slider("显示组的最小变体数", min_value=1, max_value=10, value=2, step=1)
+        
+        # 逐组显示卡片（过滤最小变体数）
         for key, items in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True):
-            if len(items) < 2:
+            if len(items) < min_variants:
                 continue
 
             with st.container():
@@ -189,6 +192,27 @@ if st.button("开始对比并显示美化结果（约 10–30 秒）", type="pri
                 )
 
                 st.markdown('</div>', unsafe_allow_html=True)
+
+        # C: 单体组单独折叠到一个 expander 里
+        single_groups = {k: v for k, v in groups.items() if len(v) == 1}
+        if single_groups:
+            with st.expander("单体市场组（每个组仅1个市场，共 {} 个）".format(len(single_groups)), expanded=False):
+                all_singles = [item[0] for items in single_groups.values() for item in items]
+                df_singles = pd.DataFrame({"市场名称": sorted(all_singles)})
+                st.dataframe(df_singles, use_container_width=True, hide_index=True)
+
+        # 加模糊搜索功能：搜索市场名称
+        st.subheader("模糊搜索市场")
+        search_query = st.text_input("输入市场名称关键词进行搜索（忽略大小写，支持模糊匹配）")
+        if search_query:
+            search_query_lower = search_query.lower()
+            matched = [q for q in common_list if search_query_lower in q]
+            if matched:
+                st.success(f"找到 {len(matched)} 个匹配的市场")
+                df_matched = pd.DataFrame({"匹配市场名称": sorted(matched)})
+                st.dataframe(df_matched, use_container_width=True, hide_index=True)
+            else:
+                st.warning("没有找到匹配的市场")
 
     else:
         st.warning("目前没有完全相同的市场名称。")
