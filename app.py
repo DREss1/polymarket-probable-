@@ -5,98 +5,100 @@ import time
 from datetime import datetime
 
 # --- 1. 基础配置与 API 路径 ---
-st.set_page_config(page_title="2026 市场标题监控", layout="wide")
-st.title("⚖️ 跨平台活跃市场标题监控 (全量扫描版)")
+st.set_page_config(page_title="2026 市场聚合监控", layout="wide")
+st.title("⚖️ 跨平台活跃市场监控 (分组聚合版)")
 
-# 平台 API 地址
 POLY_GAMMA = "https://gamma-api.polymarket.com"
 PROB_API = "https://market-api.probable.markets/public/api/v1"
 
-# --- 2. 核心抓取：地毯式全量翻页 (确保覆盖数千个活跃市场) ---
-def fetch_exhaustive_data():
-    poly_all = []
-    prob_all = []
-    
+# --- 2. 核心抓取与结构化处理 ---
+def fetch_and_group_data():
+    poly_data = {}
+    prob_data = {}
     status_msg = st.sidebar.empty()
     
-    # A. 抓取 Polymarket (扫描 500 个市场以确保找全相同标题)
+    # A. 抓取 Polymarket 并按事件(Event)分组
     for i in range(5):
-        status_msg.text(f"正在读取 Polymarket 第 {i+1} 页...")
+        status_msg.text(f"读取 Polymarket 第 {i+1} 页...")
         url = f"{POLY_GAMMA}/markets?active=true&closed=false&limit=100&offset={i*100}"
         try:
             r = requests.get(url, timeout=10).json()
             if not r: break
-            # 提取原始标题与价格
             for m in r:
-                poly_all.append({
-                    "raw_title": m['question'].strip(),
+                # 使用 event_id 或父级标题作为分组键
+                parent_title = m.get('group_id') or m.get('question', '').split('?')[0] + '?'
+                option_name = m.get('question', '').replace(parent_title, '').strip() or "主选项"
+                
+                if parent_title not in poly_data: poly_data[parent_title] = []
+                poly_data[parent_title].append({
+                    "选项": option_name,
                     "price": float(m.get('best_yes_price', 0))
                 })
-            time.sleep(0.1) # 频率保护
+            time.sleep(0.1)
         except: break
 
-    # B. 抓取 Probable (同步扫描 500 个市场)
+    # B. 抓取 Probable 并按事件分组
     for i in range(1, 6):
-        status_msg.text(f"正在读取 Probable 第 {i} 页...")
+        status_msg.text(f"读取 Probable 第 {i} 页...")
         url = f"{PROB_API}/markets/?active=true&closed=false&limit=100&page={i}"
         try:
             r = requests.get(url, timeout=10).json()
             markets = r.get('markets', [])
             if not markets: break
             for m in markets:
-                prob_all.append({
-                    "raw_title": m['question'].strip(),
+                # Probable 的 event_id 映射
+                parent_title = m.get('question', '').split('?')[0] + '?'
+                option_name = m.get('question', '').replace(parent_title, '').strip() or "主选项"
+                
+                if parent_title not in prob_data: prob_data[parent_title] = []
+                prob_data[parent_title].append({
+                    "选项": option_name,
                     "price": float(m.get('yes_price', 0))
                 })
         except: break
         
-    status_msg.success(f"同步完成！共发现 Poly: {len(poly_all)} | Prob: {len(prob_all)}")
-    return poly_all, prob_all
+    status_msg.success(f"同步完成！")
+    return poly_data, prob_data
 
-# --- 3. 匹配与排序逻辑 ---
-def get_final_matches(keyword):
-    poly_raw, prob_raw = fetch_exhaustive_data()
+# --- 3. 匹配与展示逻辑 ---
+def render_grouped_monitor(keyword):
+    poly_groups, prob_groups = fetch_and_group_data()
     
-    # 建立字典以实现高效标题对齐
-    prob_map = {m['raw_title']: m['price'] for m in prob_raw}
-    
-    results = []
-    for p in poly_raw:
-        title = p['raw_title']
-        
-        # 关键词过滤功能
+    # 获取所有共同的父级标题并排序 [针对需求 2]
+    common_titles = sorted([t for t in poly_groups if t in prob_groups])
+
+    if not common_titles:
+        st.warning("⚠️ 未发现标题匹配的活跃市场。")
+        return
+
+    for title in common_titles:
+        # 关键词过滤
         if keyword and keyword.lower() not in title.lower():
             continue
             
-        # 严格执行标题完全一致匹配
-        if title in prob_map:
-            results.append({
-                "市场标题": title,
-                "Polymarket 价格": f"${p['price']:.3f}",
-                "Probable 价格": f"${prob_map[title]:.3f}",
-                "实时价差": round(abs(p['price'] - prob_map[title]), 4)
-            })
+        with st.expander(f"📦 核心事件：{title}", expanded=False):
+            # 提取该事件下的所有选项进行对比
+            p_options = {o['选项']: o['price'] for o in poly_groups[title]}
+            b_options = {o['选项']: o['price'] for o in prob_groups[title]}
             
-    df = pd.DataFrame(results)
-    # 按照标题进行字母顺序排序
-    if not df.empty:
-        df = df.sort_values(by="市场标题")
-    return df
+            comparison = []
+            for opt in p_options:
+                if opt in b_options:
+                    comparison.append({
+                        "具体选项/赔率项": opt,
+                        "Polymarket 价": f"${p_options[opt]:.3f}",
+                        "Probable 价": f"${b_options[opt]:.3f}",
+                        "价差": round(abs(p_options[opt] - b_options[opt]), 4)
+                    })
+            
+            if comparison:
+                st.table(pd.DataFrame(comparison)) # 使用静态表格显示具体选项 [针对需求 3]
+            else:
+                st.write("该事件下暂无完全匹配的选项。")
 
 # --- 4. 界面渲染 ---
 st.sidebar.header("⚙️ 监控配置")
-kw = st.sidebar.text_input("标题关键词搜索", "")
-if st.sidebar.button("🚀 开启全量实时扫描"):
-    data_df = get_final_matches(kw)
-    
+kw = st.sidebar.text_input("搜索事件关键词", "")
+if st.sidebar.button("🚀 开始聚合扫描"):
     st.write(f"⏰ **数据同步时间: {datetime.now().strftime('%H:%M:%S')}**")
-    
-    if not data_df.empty:
-        # 渲染纯净数据表格，已去除链接与复制提示
-        st.dataframe(
-            data_df,
-            use_container_width=True,
-            hide_index=True
-        )
-    else:
-        st.warning("⚠️ 未发现标题完全一致的活跃市场。请确保关键词准确。")
+    render_grouped_monitor(kw)
