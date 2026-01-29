@@ -101,19 +101,23 @@ def get_probable_questions() -> Set[str]:
         return questions
 
 # ────────────────────────────────────────────────
-# 字符串清理 → 分组 key
+# 调整后的字符串清理 → 分组 key（保留核心动作词，如 'launch a token'、'fdv above'）
 # ────────────────────────────────────────────────
 def clean_for_grouping(q: str) -> str:
     q = q.lower().strip()
+    # 移除结尾问号和 'will ' 前缀
     q = re.sub(r'\?$', '', q)
-    q = re.sub(r'\b(will|a token|during the|one day after launch|signed)\b', '', q, flags=re.IGNORECASE)
+    q = re.sub(r'^will\s+', '', q, flags=re.IGNORECASE)
+    # 移除具体变量：金额、日期/时间段、'one day after launch' 等
     q = re.sub(r'\$\d+(?:\.\d+)?[mkb]?', '', q, flags=re.IGNORECASE)
+    q = re.sub(r'\bone day after launch\b', '', q, flags=re.IGNORECASE)
     patterns = [
-        r'\b(by|before|end of|close above|fdv above|win the|album|perform|launch)\b\s*[\w\s\d,:\-]*',
-        r'\b(march|december|january|super bowl lx|2026|2027|fifa world cup|gta vi)\b\s*[\w\s\d,]*',
+        r'\b(by|before|end of|signed by|settle at -|market cap / fdv >)\b\s*[\w\s\d,:\-]*',  # 移除后缀变量
+        r'\b(march|december|january|super bowl lx|2026|2027|fifa world cup|gta vi)\b\s*[\w\s\d,]*',  # 移除日期/事件
     ]
     for pat in patterns:
         q = re.sub(pat, '', q, flags=re.IGNORECASE)
+    # 清理多余空格、标点
     q = re.sub(r'\s+', ' ', q).strip(' -(),')
     return q if q else "uncategorized"
 
