@@ -2,113 +2,112 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
+import re
 from datetime import datetime
 
-# --- 1. 基础配置与 API 终点 ---
-st.set_page_config(page_title="2026 相同标题市场扫描器", layout="wide")
-st.title("⚖️ 跨平台“相同标题”市场实时对冲监控")
+st.set_page_config(page_title="2026 全量标题匹配", layout="wide")
+st.title("⚖️ 跨平台“相同标题”地毯式监控")
 
-# 平台 API 地址
-POLY_GAMMA = "https://gamma-api.polymarket.com"
-PROB_API = "https://market-api.probable.markets/public/api/v1"
+# --- 1. 标题脱水工具：去除空格、特殊符号、统一大小写 ---
+def normalize_title(text):
+    if not text: return ""
+    # 去除所有非字母数字字符，仅保留核心语义
+    clean = re.sub(r'[^a-zA-Z0-9]', '', text).lower()
+    return clean
 
-# --- 2. 核心抓取逻辑：寻找正在活跃的市场 ---
-def fetch_active_markets():
-    """
-    抓取两个平台所有状态为 active 且未结算的市场
-    """
-    poly_std = []
-    prob_std = []
-
-    # A. 抓取 Polymarket 活跃市场
-    try:
-        # 使用 active=true 和 closed=false 过滤
-        url = f"{POLY_GAMMA}/markets?active=true&closed=false&limit=100"
-        r = requests.get(url, timeout=10).json()
-        for m in r:
-            poly_std.append({
-                "标题": m.get('question', '').strip(),
-                "Poly价格": float(m.get('best_yes_price', 0)),
-                "链接": f"https://polymarket.com/event/{m.get('slug')}"
-            })
-    except: pass
-
-    # B. 抓取 Probable 活跃市场
-    try:
-        url = f"{PROB_API}/markets/?active=true&closed=false&limit=100"
-        r = requests.get(url, timeout=10).json()
-        for m in r.get('markets', []):
-            prob_std.append({
-                "标题": m.get('question', '').strip(),
-                "Prob价格": float(m.get('yes_price', 0)),
-                "链接": f"https://probable.markets/markets/{m.get('market_slug')}?id={m.get('id')}"
-            })
-    except: pass
-
-    return poly_std, prob_std
-
-# --- 3. 匹配与排序逻辑 ---
-def get_matched_df(keyword):
-    p_markets, b_markets = fetch_active_markets()
+# --- 2. 穷尽式抓取活跃市场 ---
+def fetch_all_active_exhaustive():
+    poly_list = []
+    prob_list = []
     
-    # 转换为字典，以标题为键，方便快速匹配
-    p_dict = {m['标题']: m for m in p_markets}
-    b_dict = {m['标题']: m for m in b_markets}
+    # A. 抓取 Polymarket (扫描前 5 页，确保覆盖 500 个市场)
+    for i in range(5):
+        url = f"https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&offset={i*100}"
+        try:
+            resp = requests.get(url, timeout=10).json()
+            if not resp: break
+            for m in resp:
+                title = m.get('question', '').strip()
+                poly_list.append({
+                    "raw_title": title,
+                    "norm_title": normalize_title(title),
+                    "price": float(m.get('best_yes_price', 0)),
+                    "url": f"https://polymarket.com/event/{m.get('slug')}"
+                })
+        except: break
 
-    matched_results = []
+    # B. 抓取 Probable (扫描前 5 页)
+    for i in range(1, 6):
+        url = f"https://market-api.probable.markets/public/api/v1/markets/?active=true&closed=false&limit=100&page={i}"
+        try:
+            resp = requests.get(url, timeout=10).json()
+            markets = resp.get('markets', [])
+            if not markets: break
+            for m in markets:
+                title = m.get('question', '').strip()
+                prob_list.append({
+                    "raw_title": title,
+                    "norm_title": normalize_title(title),
+                    "price": float(m.get('yes_price', 0)),
+                    "url": f"https://probable.markets/markets/{m.get('market_slug')}?id={m.get('id')}"
+                })
+        except: break
+        
+    return poly_list, prob_list
 
-    # 寻找标题完全一致的市场
-    for title, p_data in p_dict.items():
-        if title in b_dict:
-            b_data = b_dict[title]
+# --- 3. 匹配、排序与渲染 ---
+def run_scan(keyword):
+    p_data, b_data = fetch_all_active_exhaustive()
+    
+    # 建立 Probable 的索引
+    b_map = {m['norm_title']: m for m in b_data}
+    
+    results = []
+    for p in p_data:
+        # 只要脱水后的标题一致，即视为相同市场
+        if p['norm_title'] in b_map:
+            b = b_map[p['norm_title']]
             
-            # 关键词过滤功能
-            if keyword and keyword.lower() not in title.lower():
+            # 关键词二次过滤
+            if keyword and keyword.lower() not in p['raw_title'].lower():
                 continue
                 
-            matched_results.append({
-                "市场标题": title,
-                "Polymarket 实时价": f"${p_data['Poly价格']:.3f}",
-                "Probable 实时价": f"${b_data['Prob价格']:.3f}",
-                "价差": round(abs(p_data['Poly价格'] - b_data['Prob价格']), 4),
-                "Poly直达": p_data['链接'],
-                "Prob直达": b_data['链接']
+            results.append({
+                "市场标题": p['raw_title'],
+                "Polymarket 价格": f"${p['price']:.3f}",
+                "Probable 价格": f"${b['price']:.3f}",
+                "差价": round(abs(p['price'] - b['price']), 4),
+                "Poly 直达": p['url'],
+                "Prob 直达": b['url']
             })
-
-    # 将结果转换为 DataFrame 并按标题排序 [针对需求 2]
-    df = pd.DataFrame(matched_results)
+            
+    df = pd.DataFrame(results)
     if not df.empty:
-        df = df.sort_values(by="市场标题", ascending=True)
+        # 按标题排序 [需求 2]
+        df = df.sort_values(by="市场标题")
     return df
 
 # --- 4. 界面渲染 ---
-st.sidebar.header("🔍 搜索配置")
-search_kw = st.sidebar.text_input("输入标题关键词", "")
-refresh_sec = st.sidebar.slider("自动刷新周期 (秒)", 30, 300, 60)
+st.sidebar.header("🔍 实时搜索配置")
+kw = st.sidebar.text_input("标题关键词过滤", "")
+refresh = st.sidebar.button("立即刷新")
 
-status = st.empty()
-table = st.empty()
+placeholder = st.empty()
 
-while True:
-    with status:
-        st.write(f"🔄 正在同步全量活跃市场... 当前时间: {datetime.now().strftime('%H:%M:%S')}")
-    
-    df_final = get_matched_df(search_kw)
-    
-    with table.container():
+if refresh or "init" not in st.session_state:
+    st.session_state.init = True
+    df_final = run_scan(kw)
+    with placeholder.container():
+        st.write(f"⏰ 同步时间: {datetime.now().strftime('%H:%M:%S')}")
         if not df_final.empty:
-            st.success(f"✅ 成功找到 {len(df_final)} 个标题完全相同的活跃市场")
+            st.success(f"成功找出 {len(df_final)} 个相同市场")
             st.dataframe(
                 df_final,
                 column_config={
-                    "Poly直达": st.column_config.LinkColumn("交易链接"),
-                    "Prob直达": st.column_config.LinkColumn("交易链接")
+                    "Poly 直达": st.column_config.LinkColumn("交易"),
+                    "Prob 直达": st.column_config.LinkColumn("交易")
                 },
-                use_container_width=True,
-                hide_index=True
+                use_container_width=True, hide_index=True
             )
         else:
-            st.warning("⚠️ 目前未在两平台发现标题完全一致的活跃市场，请尝试更换关键词。")
-
-    time.sleep(refresh_sec)
-    st.rerun()
+            st.warning("地毯式扫描完成，但未发现标题完全一致的市场。请检查关键词。")
