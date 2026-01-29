@@ -155,11 +155,19 @@ if st.session_state.common_list:
     # 最小变体数滑块
     min_variants = st.slider("显示组的最小变体数（1=显示所有组，包括单体）", min_value=1, max_value=10, value=2, step=1)
 
+    # 先显示单体组（移到最前面）
+    single_groups = {k: v for k, v in groups.items() if len(v) == 1}
+    if single_groups and min_variants == 1:  # 只在允许显示单体时出现
+        with st.expander(f"单体市场组（每个组仅1个市场，共 {len(single_groups)} 个）", expanded=False):
+            all_singles = [item for items in single_groups.values() for item in items]
+            df_singles = pd.DataFrame({"市场名称": sorted(all_singles)})
+            st.dataframe(df_singles, use_container_width=True, hide_index=True)
+
     st.subheader("归类结果")
 
-    # 过滤显示：只显示变体数 >= min_variants 的组
-    filtered_groups = {k: v for k, v in groups.items() if len(v) >= min_variants}
-    for key, items in sorted(filtered_groups.items(), key=lambda x: len(x[1]), reverse=True):
+    # 只显示变体数 >= min_variants 的多变体组（不包含单体）
+    multi_groups = {k: v for k, v in groups.items() if len(v) >= min_variants and len(v) > 1}
+    for key, items in sorted(multi_groups.items(), key=lambda x: len(x[1]), reverse=True):
         with st.container():
             st.markdown(f'<div class="card">', unsafe_allow_html=True)
             title_cols = st.columns([5, 2])
@@ -178,15 +186,6 @@ if st.session_state.common_list:
             st.dataframe(df, use_container_width=True, hide_index=True, column_config={"完整市场名称": st.column_config.TextColumn(width="large")})
 
             st.markdown('</div>', unsafe_allow_html=True)
-
-    # 如果 min_variants == 1，才显示单体组 expander（否则隐藏）
-    if min_variants == 1:
-        single_groups = {k: v for k, v in groups.items() if len(v) == 1}
-        if single_groups:
-            with st.expander(f"单体市场组（每个组仅1个市场，共 {len(single_groups)} 个）", expanded=False):
-                all_singles = [item for items in single_groups.values() for item in items]
-                df_singles = pd.DataFrame({"市场名称": sorted(all_singles)})
-                st.dataframe(df_singles, use_container_width=True, hide_index=True)
 
 # 模糊搜索结果（独立实时显示）
 if search_query and 'common_list' in st.session_state and st.session_state.common_list:
