@@ -1,53 +1,46 @@
 import streamlit as st
 import requests
-import re
 import pandas as pd
-from collections import defaultdict
-from typing import Set, List, Dict
 
 # ────────────────────────────────────────────────
-# 页面设置 - 美化主题（更干净清爽：浅色调、简洁间距）
+# 页面设置 - 极简清爽风格
 # ────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Polymarket vs Probable 市场对比工具",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="Polymarket vs Probable 相同市场对比",
+    page_icon="🔍",
+    layout="wide"
 )
 
-# 自定义 CSS：简化阴影、增加间距、浅色背景
+# 简单 CSS：去除多余装饰，字体清晰
 st.markdown("""
     <style>
-    .stExpander { border: 1px solid #eee; border-radius: 8px; margin-bottom: 16px; background-color: #fafafa; }
-    .stExpander > div > button { font-size: 18px !important; font-weight: bold; color: #333; }
-    .card { padding: 12px; border-radius: 8px; border: 1px solid #eee; background-color: white; box-shadow: 0 1px 4px rgba(0,0,0,0.05); margin-bottom: 16px; }
-    .stTabs [data-testid="stTab"] { background-color: #f0f0f0; border-radius: 6px; padding: 8px 16px; }
-    .stTabs [aria-selected="true"] { background-color: #ffffff; border: 1px solid #ddd; }
-    div.stMarkdown, div.stText { color: #333; }
+    .stApp { background-color: #f8f9fa; }
+    h1, h2, h3 { color: #333; }
+    .stDataFrame { border: 1px solid #ddd; border-radius: 6px; }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("📊 Polymarket vs Probable 相同市场名称对比工具")
-st.markdown("自动找出两个平台完全相同的市场，并将变体（金额/日期/时间不同）归类显示")
+st.title("Polymarket vs Probable 相同市场名称对比")
+st.markdown("显示两个平台上**名称完全相同**的市场列表（忽略大小写）")
 
 # ────────────────────────────────────────────────
 # 数据拉取函数（缓存）
 # ────────────────────────────────────────────────
 @st.cache_data(ttl=300)
-def get_polymarket_questions() -> Set[str]:
-    with st.spinner("正在从 Polymarket 拉取市场数据..."):
+def get_polymarket_questions() -> set:
+    with st.spinner("正在从 Polymarket 拉取..."):
         base_url = "https://gamma-api.polymarket.com/markets"
         params = {"active": "true", "closed": "false", "limit": 1000, "offset": 0}
-        questions: Set[str] = set()
+        questions = set()
         while True:
             try:
-                resp = requests.get(base_url, params=params, timeout=15)
+                resp = requests.get(base_url, params=params, timeout=10)
                 resp.raise_for_status()
                 data = resp.json()
-                if not isinstance(data, list) or not data:
+                if not data:
                     break
-                for market in data:
-                    q = market.get("question", "").strip().lower()
+                for m in data:
+                    q = m.get("question", "").strip().lower()
                     if q:
                         questions.add(q)
                 params["offset"] += params["limit"]
@@ -57,28 +50,25 @@ def get_polymarket_questions() -> Set[str]:
         return questions
 
 @st.cache_data(ttl=300)
-def get_probable_questions() -> Set[str]:
-    with st.spinner("正在从 Probable 拉取市场数据..."):
+def get_probable_questions() -> set:
+    with st.spinner("正在从 Probable 拉取..."):
         base_url = "https://market-api.probable.markets/public/api/v1/markets/"
-        questions: Set[str] = set()
+        questions = set()
         page = 1
         limit = 100
         while True:
             try:
                 params = {"page": page, "limit": limit, "active": "true"}
-                resp = requests.get(base_url, params=params, timeout=15)
+                resp = requests.get(base_url, params=params, timeout=10)
                 resp.raise_for_status()
                 data = resp.json()
                 markets = data.get("markets", [])
-                pagination = data.get("pagination", {})
-
-                for market in markets:
-                    q = market.get("question", "").strip().lower()
+                if not markets:
+                    break
+                for m in markets:
+                    q = m.get("question", "").strip().lower()
                     if q:
                         questions.add(q)
-
-                if not pagination.get("hasMore", False):
-                    break
                 page += 1
             except Exception as e:
                 st.error(f"Probable 拉取失败：{e}")
@@ -86,123 +76,51 @@ def get_probable_questions() -> Set[str]:
         return questions
 
 # ────────────────────────────────────────────────
-# 字符串清理 → 分组 key
-# ────────────────────────────────────────────────
-def clean_for_grouping(q: str) -> str:
-    q = q.lower().strip()
-    q = re.sub(r'\?$', '', q)
-    q = re.sub(r'^will\s+', '', q, flags=re.IGNORECASE)
-    q = re.sub(r'\$\d+(?:\.\d+)?[mkb]?', '', q, flags=re.IGNORECASE)
-    q = re.sub(r'\bone day after launch\b', '', q, flags=re.IGNORECASE)
-    patterns = [
-        r'\b(by|before|end of|signed by|settle at -|market cap / fdv >)\b\s*[\w\s\d,:\-]*',
-        r'\b(march|december|january|super bowl lx|2026|2027|fifa world cup|gta vi)\b\s*[\w\s\d,]*',
-    ]
-    for pat in patterns:
-        q = re.sub(pat, '', q, flags=re.IGNORECASE)
-    q = re.sub(r'\s+', ' ', q).strip(' -(),')
-    return q if q else "uncategorized"
-
-
-def group_by_cleaned_key(questions: List[str]) -> Dict[str, List[str]]:
-    groups = defaultdict(list)
-    for q in sorted(questions):
-        key = clean_for_grouping(q)
-        groups[key].append(q)
-    return dict(groups)
-
-# ────────────────────────────────────────────────
-# 使用 session_state 持久化数据
-# ────────────────────────────────────────────────
-if 'common_list' not in st.session_state:
-    st.session_state.common_list = []
-if 'groups' not in st.session_state:
-    st.session_state.groups = {}
-
 # 模糊搜索框 - 放在最上方
-st.subheader("模糊搜索市场（实时搜索所有共同市场）")
-search_query = st.text_input("输入市场名称关键词（忽略大小写，支持模糊匹配）", key="global_search")
+# ────────────────────────────────────────────────
+st.subheader("搜索共同市场")
+search_query = st.text_input("输入关键词（忽略大小写，支持模糊匹配）", key="search_input")
 
-# 按钮触发数据拉取和分组
-if st.button("开始对比并显示结果（约 10–30 秒）", type="primary", use_container_width=True):
-    poly_questions = get_polymarket_questions()
-    prob_questions = get_probable_questions()
+# ────────────────────────────────────────────────
+# 主逻辑：按钮触发对比
+# ────────────────────────────────────────────────
+if st.button("开始对比（约 10–30 秒）", type="primary"):
+    poly_qs = get_polymarket_questions()
+    prob_qs = get_probable_questions()
 
     col1, col2 = st.columns(2)
-    col1.metric("Polymarket 活跃市场", len(poly_questions))
-    col2.metric("Probable 活跃市场", len(prob_questions))
+    col1.metric("Polymarket 活跃市场", len(poly_qs))
+    col2.metric("Probable 活跃市场", len(prob_qs))
 
-    common = poly_questions.intersection(prob_questions)
-    st.session_state.common_list = list(common)
+    common = poly_qs.intersection(prob_qs)
+    common_list = sorted(common)
 
-    if st.session_state.common_list:
-        st.session_state.groups = group_by_cleaned_key(st.session_state.common_list)
-        st.success(f"找到 {len(st.session_state.common_list)} 个完全相同的市场，已自动归类为 {len(st.session_state.groups)} 组")
+    if common_list:
+        st.success(f"找到 {len(common_list)} 个名称完全相同的市场")
+
+        # 直接显示表格
+        df = pd.DataFrame({"市场名称": common_list})
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={"市场名称": st.column_config.TextColumn(width="large")}
+        )
     else:
-        st.warning("目前没有完全相同的市场名称。")
+        st.warning("没有找到名称完全相同的市场")
 
-# ────────────────────────────────────────────────
-# 显示部分（使用 session_state 中的数据）
-# ────────────────────────────────────────────────
-if st.session_state.common_list:
-    groups = st.session_state.groups
-
-    # 统计卡片
-    group_sizes = [len(items) for items in groups.values()]
-    st.subheader("总结统计")
-    cols = st.columns(3)
-    cols[0].metric("总组数", len(groups))
-    cols[1].metric("最大组变体数", max(group_sizes) if group_sizes else 0)
-    cols[2].metric("平均变体数/组", round(sum(group_sizes)/len(groups), 1) if groups else 0)
-
-    # 最小变体数滑块
-    min_variants = st.slider("显示组的最小变体数（1=显示所有组，包括单体）", min_value=1, max_value=10, value=2, step=1)
-
-    # 用 tabs 分标签页：单体市场置顶在前
-    tab1, tab2 = st.tabs(["单体市场组", "多变体市场组"])
-
-    with tab1:
-        single_groups = {k: v for k, v in groups.items() if len(v) == 1}
-        if single_groups and min_variants == 1:
-            all_singles = [item for items in single_groups.values() for item in items]
-            df_singles = pd.DataFrame({"市场名称": sorted(all_singles)})
-            st.dataframe(df_singles, use_container_width=True, hide_index=True)
+# 实时模糊搜索结果（不依赖按钮）
+if search_query:
+    if 'common_list' in locals() and common_list:
+        matched = [q for q in common_list if search_query.lower() in q]
+        if matched:
+            st.subheader(f"搜索结果：找到 {len(matched)} 个匹配")
+            df_search = pd.DataFrame({"匹配市场名称": sorted(matched)})
+            st.dataframe(df_search, use_container_width=True, hide_index=True)
         else:
-            st.info("无单体市场或已过滤")
-
-    with tab2:
-        # 显示变体数 >= min_variants 的多变体组
-        multi_groups = {k: v for k, v in groups.items() if len(v) >= min_variants and len(v) > 1}
-        for key, items in sorted(multi_groups.items(), key=lambda x: len(x[1]), reverse=True):
-            with st.container():
-                st.markdown(f'<div class="card">', unsafe_allow_html=True)
-                title_cols = st.columns([5, 2])
-                with title_cols[0]:
-                    st.markdown(f"**组：{key or '其他核心描述'}**")
-                with title_cols[1]:
-                    size = len(items)
-                    if size >= 6:
-                        st.success(f"{size} 个变体")
-                    elif size >= 4:
-                        st.info(f"{size} 个变体")
-                    else:
-                        st.warning(f"{size} 个变体")
-
-                df = pd.DataFrame({"完整市场名称": sorted(items)})
-                st.dataframe(df, use_container_width=True, hide_index=True, column_config={"完整市场名称": st.column_config.TextColumn(width="large")})
-
-                st.markdown('</div>', unsafe_allow_html=True)
-
-# 模糊搜索结果（独立实时显示）
-if search_query and 'common_list' in st.session_state and st.session_state.common_list:
-    search_query_lower = search_query.lower()
-    matched = [q for q in st.session_state.common_list if search_query_lower in q]
-    if matched:
-        st.subheader(f"搜索结果：找到 {len(matched)} 个匹配的市场")
-        df_matched = pd.DataFrame({"匹配市场名称": sorted(matched)})
-        st.dataframe(df_matched, use_container_width=True, hide_index=True)
+            st.info("没有匹配结果")
     else:
-        st.warning("没有找到匹配的市场")
+        st.info("请先点击“开始对比”获取数据")
 
 # ────────────────────────────────────────────────
 # 页尾
