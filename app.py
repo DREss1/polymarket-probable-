@@ -6,7 +6,7 @@ from collections import defaultdict
 from typing import Set, List, Dict
 
 # ────────────────────────────────────────────────
-# 页面设置 - 美化主题
+# 页面设置 - 美化主题（更干净清爽：浅色调、简洁间距）
 # ────────────────────────────────────────────────
 st.set_page_config(
     page_title="Polymarket vs Probable 市场对比工具",
@@ -15,12 +15,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 自定义 CSS 美化
+# 自定义 CSS：简化阴影、增加间距、浅色背景
 st.markdown("""
     <style>
-    .stExpander { border: 1px solid #ddd; border-radius: 8px; margin-bottom: 16px; background-color: #f9f9f9; }
-    .stExpander > div > button { font-size: 18px !important; font-weight: bold; }
-    .card { padding: 16px; border-radius: 12px; border: 1px solid #e0e0e0; background-color: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
+    .stExpander { border: 1px solid #eee; border-radius: 8px; margin-bottom: 16px; background-color: #fafafa; }
+    .stExpander > div > button { font-size: 18px !important; font-weight: bold; color: #333; }
+    .card { padding: 12px; border-radius: 8px; border: 1px solid #eee; background-color: white; box-shadow: 0 1px 4px rgba(0,0,0,0.05); margin-bottom: 16px; }
+    .stTabs [data-testid="stTab"] { background-color: #f0f0f0; border-radius: 6px; padding: 8px 16px; }
+    .stTabs [aria-selected="true"] { background-color: #ffffff; border: 1px solid #ddd; }
+    div.stMarkdown, div.stText { color: #333; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -155,29 +158,40 @@ if st.session_state.common_list:
     # 最小变体数滑块
     min_variants = st.slider("显示组的最小变体数（1=显示所有组，包括单体）", min_value=1, max_value=10, value=2, step=1)
 
-    st.subheader("归类结果")
+    # 用 tabs 分标签页：单体市场置顶在前
+    tab1, tab2 = st.tabs(["单体市场组", "多变体市场组"])
 
-    # 过滤显示所有 >= min_variants 的组（包括单体，如果 min_variants=1）
-    filtered_groups = {k: v for k, v in groups.items() if len(v) >= min_variants}
-    for key, items in sorted(filtered_groups.items(), key=lambda x: len(x[1]), reverse=True):
-        with st.container():
-            st.markdown(f'<div class="card">', unsafe_allow_html=True)
-            title_cols = st.columns([5, 2])
-            with title_cols[0]:
-                st.markdown(f"**组：{key or '其他核心描述'}**")
-            with title_cols[1]:
-                size = len(items)
-                if size >= 6:
-                    st.success(f"{size} 个变体")
-                elif size >= 4:
-                    st.info(f"{size} 个变体")
-                else:
-                    st.warning(f"{size} 个变体（单体市场）")
+    with tab1:
+        single_groups = {k: v for k, v in groups.items() if len(v) == 1}
+        if single_groups and min_variants == 1:
+            all_singles = [item for items in single_groups.values() for item in items]
+            df_singles = pd.DataFrame({"市场名称": sorted(all_singles)})
+            st.dataframe(df_singles, use_container_width=True, hide_index=True)
+        else:
+            st.info("无单体市场或已过滤")
 
-            df = pd.DataFrame({"完整市场名称": sorted(items)})
-            st.dataframe(df, use_container_width=True, hide_index=True, column_config={"完整市场名称": st.column_config.TextColumn(width="large")})
+    with tab2:
+        # 显示变体数 >= min_variants 的多变体组
+        multi_groups = {k: v for k, v in groups.items() if len(v) >= min_variants and len(v) > 1}
+        for key, items in sorted(multi_groups.items(), key=lambda x: len(x[1]), reverse=True):
+            with st.container():
+                st.markdown(f'<div class="card">', unsafe_allow_html=True)
+                title_cols = st.columns([5, 2])
+                with title_cols[0]:
+                    st.markdown(f"**组：{key or '其他核心描述'}**")
+                with title_cols[1]:
+                    size = len(items)
+                    if size >= 6:
+                        st.success(f"{size} 个变体")
+                    elif size >= 4:
+                        st.info(f"{size} 个变体")
+                    else:
+                        st.warning(f"{size} 个变体")
 
-            st.markdown('</div>', unsafe_allow_html=True)
+                df = pd.DataFrame({"完整市场名称": sorted(items)})
+                st.dataframe(df, use_container_width=True, hide_index=True, column_config={"完整市场名称": st.column_config.TextColumn(width="large")})
+
+                st.markdown('</div>', unsafe_allow_html=True)
 
 # 模糊搜索结果（独立实时显示）
 if search_query and 'common_list' in st.session_state and st.session_state.common_list:
