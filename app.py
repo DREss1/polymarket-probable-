@@ -83,12 +83,15 @@ def get_probable_questions() -> Set[str]:
         return questions
 
 # ────────────────────────────────────────────────
-# 字符串清理 → 分组 key
+# 调整后的字符串清理 → 分组 key（新增移除价格范围）
 # ────────────────────────────────────────────────
 def clean_for_grouping(q: str) -> str:
     q = q.lower().strip()
     q = re.sub(r'\?$', '', q)
     q = re.sub(r'^will\s+', '', q, flags=re.IGNORECASE)
+    # 先移除价格范围（如 $4,350-$4,475）
+    q = re.sub(r'\$\d{1,3}(?:,\d{3})*-\$\d{1,3}(?:,\d{3})*', '', q, flags=re.IGNORECASE)
+    # 再移除单金额
     q = re.sub(r'\$\d+(?:\.\d+)?[mkb]?', '', q, flags=re.IGNORECASE)
     q = re.sub(r'\bone day after launch\b', '', q, flags=re.IGNORECASE)
     patterns = [
@@ -155,9 +158,9 @@ if st.session_state.common_list:
     # 最小变体数滑块
     min_variants = st.slider("显示组的最小变体数（1=显示所有组，包括单体）", min_value=1, max_value=10, value=2, step=1)
 
-    # 先显示单体组（移到最前面）
+    # 先显示单体组（最前面）
     single_groups = {k: v for k, v in groups.items() if len(v) == 1}
-    if single_groups and min_variants == 1:  # 只在允许显示单体时出现
+    if single_groups and min_variants == 1:
         with st.expander(f"单体市场组（每个组仅1个市场，共 {len(single_groups)} 个）", expanded=False):
             all_singles = [item for items in single_groups.values() for item in items]
             df_singles = pd.DataFrame({"市场名称": sorted(all_singles)})
@@ -165,7 +168,7 @@ if st.session_state.common_list:
 
     st.subheader("归类结果")
 
-    # 只显示变体数 >= min_variants 的多变体组（不包含单体）
+    # 显示变体数 >= min_variants 的多变体组（不包含单体）
     multi_groups = {k: v for k, v in groups.items() if len(v) >= min_variants and len(v) > 1}
     for key, items in sorted(multi_groups.items(), key=lambda x: len(x[1]), reverse=True):
         with st.container():
