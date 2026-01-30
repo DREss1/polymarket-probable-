@@ -3,7 +3,7 @@ import requests
 import re
 import pandas as pd
 from collections import defaultdict
-from typing import Set, List, Dict
+from typing import Set, List, Dict, Optional
 
 # ────────────────────────────────────────────────
 # 页面设置 - 美化主题
@@ -28,14 +28,14 @@ st.title("📊 Polymarket vs Probable 相同市场名称对比工具")
 st.markdown("自动找出两个平台完全相同的市场，并将变体（金额/日期/时间不同）归类显示")
 
 # ────────────────────────────────────────────────
-# 数据拉取函数（缓存）
+# 数据拉取函数（缓存完整市场列表）
 # ────────────────────────────────────────────────
 @st.cache_data(ttl=300)
-def get_polymarket_questions() -> Set[str]:
+def get_polymarket_markets() -> List[Dict]:
     with st.spinner("正在从 Polymarket 拉取市场数据..."):
         base_url = "https://gamma-api.polymarket.com/markets"
         params = {"active": "true", "closed": "false", "limit": 1000, "offset": 0}
-        questions: Set[str] = set()
+        markets = []
         while True:
             try:
                 resp = requests.get(base_url, params=params, timeout=15)
@@ -43,21 +43,18 @@ def get_polymarket_questions() -> Set[str]:
                 data = resp.json()
                 if not isinstance(data, list) or not data:
                     break
-                for market in data:
-                    q = market.get("question", "").strip().lower()
-                    if q:
-                        questions.add(q)
+                markets.extend(data)
                 params["offset"] += params["limit"]
             except Exception as e:
                 st.error(f"Polymarket 拉取失败：{e}")
-                return set()
-        return questions
+                return []
+        return markets
 
 @st.cache_data(ttl=300)
-def get_probable_questions() -> Set[str]:
+def get_probable_markets() -> List[Dict]:
     with st.spinner("正在从 Probable 拉取市场数据..."):
         base_url = "https://market-api.probable.markets/public/api/v1/markets/"
-        questions: Set[str] = set()
+        markets = []
         page = 1
         limit = 100
         while True:
@@ -66,32 +63,25 @@ def get_probable_questions() -> Set[str]:
                 resp = requests.get(base_url, params=params, timeout=15)
                 resp.raise_for_status()
                 data = resp.json()
-                markets = data.get("markets", [])
-                pagination = data.get("pagination", {})
-
-                for market in markets:
-                    q = market.get("question", "").strip().lower()
-                    if q:
-                        questions.add(q)
-
-                if not pagination.get("hasMore", False):
+                new_markets = data.get("markets", [])
+                if not new_markets:
                     break
+                markets.extend(new_markets)
                 page += 1
             except Exception as e:
                 st.error(f"Probable 拉取失败：{e}")
-                return set()
-        return questions
+                return []
+        return markets
 
 # ────────────────────────────────────────────────
-# 调整后的字符串清理 → 分组 key（新增移除价格范围）
+# 字符串清理 fallback
 # ────────────────────────────────────────────────
 def clean_for_grouping(q: str) -> str:
     q = q.lower().strip()
     q = re.sub(r'\?$', '', q)
     q = re.sub(r'^will\s+', '', q, flags=re.IGNORECASE)
-    # 先移除价格范围（如 $4,350-$4,475）
+    # 移除价格范围
     q = re.sub(r'\$\d{1,3}(?:,\d{3})*-\$\d{1,3}(?:,\d{3})*', '', q, flags=re.IGNORECASE)
-    # 再移除单金额
     q = re.sub(r'\$\d+(?:\.\d+)?[mkb]?', '', q, flags=re.IGNORECASE)
     q = re.sub(r'\bone day after launch\b', '', q, flags=re.IGNORECASE)
     patterns = [
@@ -103,21 +93,28 @@ def clean_for_grouping(q: str) -> str:
     q = re.sub(r'\s+', ' ', q).strip(' -(),')
     return q if q else "uncategorized"
 
-
-def group_by_cleaned_key(questions: List[str]) -> Dict[str, List[str]]:
+# ────────────────────────────────────────────────
+# 智能分组：优先 event_id / category，fallback 字符串清理
+# ────────────────────────────────────────────────
+def group_markets(markets: List[Dict], platform: str) -> Dict[str, List[Dict]]:
     groups = defaultdict(list)
-    for q in sorted(questions):
-        key = clean_for_grouping(q)
-        groups[key].append(q)
-    return dict(groups)
+    for m in markets:
+        # 优先用 event_id 或 event
+        key = m.get('event_id') or m.get('event') or m.get('category', '') + '_' + m.get('subcategory', '')
+        if not key or key == '_':  # fallback 字符串清理
+            key = clean_for_grouping(m.get('question', ''))
+        groups[key].append(m)
+    return groups
 
 # ────────────────────────────────────────────────
 # 使用 session_state 持久化数据
 # ────────────────────────────────────────────────
-if 'common_list' not in st.session_state:
-    st.session_state.common_list = []
-if 'groups' not in st.session_state:
-    st.session_state.groups = {}
+if 'poly_markets' not in st.session_state:
+    st.session_state.poly_markets = []
+if 'prob_markets' not in st.session_state:
+    st.session_state.prob_markets = []
+if 'common_groups' not in st.session_state:
+    st.session_state.common_groups = {}
 
 # 模糊搜索框 - 放在最上方
 st.subheader("模糊搜索市场（实时搜索所有共同市场）")
@@ -125,27 +122,39 @@ search_query = st.text_input("输入市场名称关键词（忽略大小写，�
 
 # 按钮触发数据拉取和分组
 if st.button("开始对比并显示结果（约 10–30 秒）", type="primary", use_container_width=True):
-    poly_questions = get_polymarket_questions()
-    prob_questions = get_probable_questions()
+    st.session_state.poly_markets = get_polymarket_markets()
+    st.session_state.prob_markets = get_probable_markets()
 
     col1, col2 = st.columns(2)
-    col1.metric("Polymarket 活跃市场", len(poly_questions))
-    col2.metric("Probable 活跃市场", len(prob_questions))
+    col1.metric("Polymarket 活跃市场", len(st.session_state.poly_markets))
+    col2.metric("Probable 活跃市场", len(st.session_state.prob_markets))
 
-    common = poly_questions.intersection(prob_questions)
-    st.session_state.common_list = list(common)
+    # 共同市场：基于 question 匹配
+    poly_questions = {m.get("question", "").strip().lower(): m for m in st.session_state.poly_markets}
+    prob_questions = {m.get("question", "").strip().lower(): m for m in st.session_state.prob_markets}
+    common_questions = set(poly_questions).intersection(prob_questions)
+    common_poly = [poly_questions[q] for q in common_questions]
+    common_prob = [prob_questions[q] for q in common_questions]
 
-    if st.session_state.common_list:
-        st.session_state.groups = group_by_cleaned_key(st.session_state.common_list)
-        st.success(f"找到 {len(st.session_state.common_list)} 个完全相同的市场，已自动归类为 {len(st.session_state.groups)} 组")
+    # 智能分组：结合两个平台的 groups
+    poly_groups = group_markets(common_poly, "poly")
+    prob_groups = group_markets(common_prob, "prob")
+    # 合并：用 key 作为共同组
+    common_groups = {}
+    for key in set(poly_groups).intersection(prob_groups):
+        common_groups[key] = poly_groups[key] + prob_groups[key]  # 合并变体
+    st.session_state.common_groups = common_groups
+
+    if common_questions:
+        st.success(f"找到 {len(common_questions)} 个完全相同的市场，已自动归类为 {len(st.session_state.common_groups)} 组")
     else:
         st.warning("目前没有完全相同的市场名称。")
 
 # ────────────────────────────────────────────────
 # 显示部分（使用 session_state 中的数据）
 # ────────────────────────────────────────────────
-if st.session_state.common_list:
-    groups = st.session_state.groups
+if st.session_state.common_groups:
+    groups = st.session_state.common_groups
 
     # 统计卡片
     group_sizes = [len(items) for items in groups.values()]
@@ -162,7 +171,7 @@ if st.session_state.common_list:
     single_groups = {k: v for k, v in groups.items() if len(v) == 1}
     if single_groups and min_variants == 1:
         with st.expander(f"单体市场组（每个组仅1个市场，共 {len(single_groups)} 个）", expanded=False):
-            all_singles = [item for items in single_groups.values() for item in items]
+            all_singles = [item.get("question", "Unknown") for items in single_groups.values() for item in items]
             df_singles = pd.DataFrame({"市场名称": sorted(all_singles)})
             st.dataframe(df_singles, use_container_width=True, hide_index=True)
 
@@ -185,7 +194,8 @@ if st.session_state.common_list:
                 else:
                     st.warning(f"{size} 个变体")
 
-            df = pd.DataFrame({"完整市场名称": sorted(items)})
+            questions = [item.get("question", "Unknown") for item in items]
+            df = pd.DataFrame({"完整市场名称": sorted(questions)})
             st.dataframe(df, use_container_width=True, hide_index=True, column_config={"完整市场名称": st.column_config.TextColumn(width="large")})
 
             st.markdown('</div>', unsafe_allow_html=True)
