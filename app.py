@@ -130,7 +130,7 @@ def load_and_process_data():
                 poly_m = poly_dict[q]
                 prob_m = prob_dict[q]
 
-                # --- 1. Polymarket 价格 ---
+                # --- 1. Polymarket 价格 & 数据 (新增部分) ---
                 poly_price_str = "N/A"
                 raw_prices = poly_m.get("outcomePrices", [])
                 if isinstance(raw_prices, str):
@@ -143,6 +143,14 @@ def load_and_process_data():
                     p_no = float(prices[1]) if len(prices) > 1 else 0
                     poly_price_str = f"{p_yes:.1%} / {p_no:.1%}"
                 except: poly_price_str = "Err"
+
+                # 提取 Poly 流动性与成交量
+                # 注意：Polymarket API 有时返回 'volume' (总) 有时有 'volume24hr'，优先取 24h
+                poly_liq = safe_float(poly_m.get("liquidity", 0))
+                poly_vol = safe_float(poly_m.get("volume24hr", 0)) 
+                if poly_vol == 0:
+                     # 如果没有 24h 字段，回退到 total volume
+                     poly_vol = safe_float(poly_m.get("volume", 0))
 
                 # --- 2. Probable 价格 ---
                 prob_ids = prob_token_map.get(q, {})
@@ -157,20 +165,26 @@ def load_and_process_data():
                     prob_price_str = f"{pr_yes:.1%} / {pr_no:.1%}"
                 except: prob_price_str = "N/A"
 
-                # --- 3. 流动性与成交量 ---
+                # --- 3. Probable 流动性与成交量 ---
                 prob_liq = safe_float(prob_m.get("liquidity", 0))
                 prob_vol = safe_float(prob_m.get("volume24hr", 0))
 
                 rows.append({
                     "市场名称": poly_m["question"],
                     "Poly 价格 (Y/N)": poly_price_str,
+                    "Poly 流动性": poly_liq,  # 新增
+                    "Poly 24h量": poly_vol,    # 新增
                     "Prob 价格 (Y/N)": prob_price_str,
                     "Prob 流动性": prob_liq,
                     "Prob 24h量": prob_vol
                 })
 
-            # 强制指定列顺序
-            cols_order = ["市场名称", "Poly 价格 (Y/N)", "Prob 价格 (Y/N)", "Prob 流动性", "Prob 24h量"]
+            # 强制指定列顺序 (扩充了 Poly 的列)
+            cols_order = [
+                "市场名称", 
+                "Poly 价格 (Y/N)", "Poly 流动性", "Poly 24h量",
+                "Prob 价格 (Y/N)", "Prob 流动性", "Prob 24h量"
+            ]
             st.session_state.master_df = pd.DataFrame(rows, columns=cols_order)
             
             status_text.success(f"数据加载完成！共找到 {len(common_questions)} 个相同市场。")
@@ -181,7 +195,6 @@ def load_and_process_data():
 
 # --- 主界面布局 ---
 
-# 布局优化：搜索框 + 两个按钮（刷新、重置）
 col_search, col_reset, col_refresh = st.columns([5, 1, 1], gap="small")
 
 with col_refresh:
@@ -190,13 +203,11 @@ with col_refresh:
     if st.button("🔄 刷新全量数据", type="primary", use_container_width=True):
         load_and_process_data()
 
-# 数据存在时显示搜索框
 if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     df = st.session_state.master_df
     
     with col_search:
         market_options = df["市场名称"].tolist()
-        # 增加 key="market_select" 以便回调函数可以清空它
         selected_market = st.selectbox(
             "🔍 搜索/筛选市场 (输入关键词自动联想)", 
             options=market_options,
@@ -206,37 +217,32 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
             help="输入关键词定位特定市场。"
         )
 
-    # 解决问题1：增加一个独立的清空按钮
     with col_reset:
         st.write("")
         st.write("")
-        # 这个按钮点击后会触发 clear_selection 函数，把搜索框置为 None
         st.button("❌ 重置筛选", on_click=clear_selection, use_container_width=True, help="点击这里一键清空搜索框")
 
-    # 解决问题2：如果 selected_market 为空，则 filtered_df = df (显示全部)
     if selected_market:
-        filtered_df = df[df["市场名称"] == selected_market].copy() # 使用 copy 避免样式警告
+        filtered_df = df[df["市场名称"] == selected_market].copy()
         st.info(f"📍 已定位: {selected_market}")
     else:
-        filtered_df = df.copy() # 显示全部
+        filtered_df = df.copy()
 
-    # 解决问题3：使用 Pandas Styler 强制左对齐
-    # 这一步将数字格式化为字符串 "$1,234" 并设置 CSS text-align: left
+    # 样式升级：对所有金额列（Poly 和 Prob）都应用左对齐和千分位格式
     styled_df = filtered_df.style.format({
+        "Poly 流动性": "${:,.0f}",
+        "Poly 24h量": "${:,.0f}",
         "Prob 流动性": "${:,.0f}",
         "Prob 24h量": "${:,.0f}"
     }).set_properties(
-        subset=["Prob 流动性", "Prob 24h量"], 
-        **{'text-align': 'left'} # 强制左对齐！
+        subset=["Poly 流动性", "Poly 24h量", "Prob 流动性", "Prob 24h量"], 
+        **{'text-align': 'left'} # 强制所有数字列左对齐
     )
 
-    # 表格展示
     st.dataframe(
         styled_df, 
         use_container_width=True, 
         hide_index=True,
-        # 注意：使用 style 后 column_config 的某些功能可能会被覆盖，
-        # 但我们为了对齐，优先使用 style。
     )
     
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据 (共 {len(df)} 条)")
