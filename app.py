@@ -111,7 +111,7 @@ def get_probable_prices_batch(token_ids):
             pass
     return results
 
-# --- 4. 真实深度计算函数 (返回详细信息) ---
+# --- 4. 真实深度计算函数 (返回详细数据) ---
 def calculate_arb_capacity(poly_id, prob_id):
     cache_key = f"{poly_id}_{prob_id}"
     if cache_key in st.session_state['depth_cache']:
@@ -130,6 +130,7 @@ def calculate_arb_capacity(poly_id, prob_id):
                 best_ask = asks[0]
                 price = float(best_ask["price"])
                 size = float(best_ask["size"])
+                # 过滤掉 0 价格
                 if price > 0.005: capacity_poly = price * size
     except: pass
 
@@ -143,10 +144,11 @@ def calculate_arb_capacity(poly_id, prob_id):
                 best_ask = asks[0]
                 price = float(best_ask[0])
                 size = float(best_ask[1])
+                # 过滤掉 0 价格
                 if price > 0.005: capacity_prob = price * size
     except: pass
     
-    # 结果是一个元组：(总容量, Poly容量, Prob容量)
+    # 返回三元组 (总容量, Poly端, Prob端)
     result = (min(capacity_poly, capacity_prob), capacity_poly, capacity_prob)
     
     st.session_state['depth_cache'][cache_key] = result
@@ -353,7 +355,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据")
 
     # ==========================================
-    # 🚀 套利机会监测 (透明深度版)
+    # 🚀 套利机会监测 (修复版 - 移除 Matplotlib 依赖)
     # ==========================================
     st.markdown("---") 
     
@@ -424,10 +426,10 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     poly_side_id = cand['poly_yes_id'] if cand['strat'] == 'A' else cand['poly_no_id']
                     prob_side_id = cand['prob_no_id'] if cand['strat'] == 'A' else cand['prob_yes_id']
                     
-                    # 返回的是 (real, poly, prob) 三元组
+                    # 返回三元组
                     (real_cap, cap_poly, cap_prob) = calculate_arb_capacity(poly_side_id, prob_side_id)
                     
-                    # 关键修改：只要大于用户设定的阈值就显示 (>= 而不是 >，确保 0也能显示)
+                    # 显示所有 > min_cap_filter 的机会
                     if real_cap >= min_cap_filter: 
                         final_data.append({
                             "市场": cand['question'],
@@ -449,13 +451,15 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                 else:
                     st.warning(f"⚠️ 发现 {len(final_df)} 个理论机会。")
 
+                # --- 修复点：移除了 .background_gradient(...) ---
                 styled_final = final_df.style.format({
                     "成本": "${:.3f}",
                     "收益率": "+{:.1%}",
                     "Poly深度": "${:,.2f}",
                     "Prob深度": "${:,.2f}",
                     "真实容量": "${:,.2f}",
-                }, na_rep="未计算").background_gradient(subset=["真实容量"], cmap="Greens", vmin=0, vmax=100)
+                }, na_rep="未计算")
+                # ----------------------------------------------
 
                 st.dataframe(
                     styled_final,
