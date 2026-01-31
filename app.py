@@ -111,7 +111,7 @@ def get_probable_prices_batch(token_ids):
             pass
     return results
 
-# --- 4. 真实深度计算函数 (【修改核心】：只取卖一) ---
+# --- 4. 真实深度计算函数 (返回详细信息) ---
 def calculate_arb_capacity(poly_id, prob_id):
     cache_key = f"{poly_id}_{prob_id}"
     if cache_key in st.session_state['depth_cache']:
@@ -120,43 +120,37 @@ def calculate_arb_capacity(poly_id, prob_id):
     capacity_poly = 0.0
     capacity_prob = 0.0
     
-    # 1. Polymarket: 获取 Orderbook -> 只看 asks[0]
+    # 1. Polymarket Best Ask
     try:
         url = f"https://clob.polymarket.com/book?token_id={poly_id}"
         resp = requests.get(url, headers=HEADERS, timeout=3)
         if resp.status_code == 200:
             asks = resp.json().get("asks", [])
-            # 逻辑修改：直接取第一单
             if asks:
                 best_ask = asks[0]
                 price = float(best_ask["price"])
                 size = float(best_ask["size"])
-                # 依然过滤掉 0 价格的无效单
-                if price > 0.005:
-                    capacity_poly = price * size
+                if price > 0.005: capacity_poly = price * size
     except: pass
 
-    # 2. Probable: 获取 Orderbook -> 只看 asks[0]
+    # 2. Probable Best Ask
     try:
         url = f"https://api.probable.markets/public/api/v1/book?token_id={prob_id}"
         resp = requests.get(url, headers=HEADERS, timeout=3)
         if resp.status_code == 200:
             asks = resp.json().get("asks", [])
-            # 逻辑修改：直接取第一单
             if asks:
-                best_ask = asks[0] # 格式 ["0.99", "100"]
+                best_ask = asks[0]
                 price = float(best_ask[0])
                 size = float(best_ask[1])
-                
-                if price > 0.005:
-                    capacity_prob = price * size
+                if price > 0.005: capacity_prob = price * size
     except: pass
     
-    # 取短板：两边卖一金额较小者
-    real_cap = min(capacity_poly, capacity_prob)
+    # 结果是一个元组：(总容量, Poly容量, Prob容量)
+    result = (min(capacity_poly, capacity_prob), capacity_poly, capacity_prob)
     
-    st.session_state['depth_cache'][cache_key] = real_cap
-    return real_cap
+    st.session_state['depth_cache'][cache_key] = result
+    return result
 
 # --- 核心逻辑 ---
 def load_and_process_data():
@@ -193,7 +187,7 @@ def load_and_process_data():
             poly_token_map = {} 
 
             for q in common_questions:
-                # Probable ID
+                # Probable Logic
                 prob_m = prob_dict[q]
                 p_outcomes = parse_outcomes(prob_m.get("outcomes"))
                 p_tokens = prob_m.get("tokens", [])
@@ -203,7 +197,7 @@ def load_and_process_data():
                 if p_yes: all_tokens_to_fetch.append(p_yes)
                 if p_no: all_tokens_to_fetch.append(p_no)
 
-                # Polymarket ID
+                # Polymarket Logic
                 poly_m = poly_dict[q]
                 poly_clob_ids = []
                 if "clobTokenIds" in poly_m:
@@ -359,18 +353,18 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据")
 
     # ==========================================
-    # 🚀 套利机会监测 (卖一狙击版)
+    # 🚀 套利机会监测 (透明深度版)
     # ==========================================
     st.markdown("---") 
     
     with st.container(border=True):
-        st.subheader("🚀 套利机会扫描 (Best Ask Only)")
+        st.subheader("🚀 套利机会扫描 (Arbitrage)")
         
         c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
             min_profit = st.slider("💰 最小利润率 (%)", 0.0, 50.0, 0.0, 0.1)
         with c2:
-            min_cap_filter = st.slider("💧 最小卖一容量过滤 ($)", 0.0, 100.0, 0.0, 1.0, help="0 表示显示所有结果。此数值仅基于【卖一】挂单金额。")
+            min_cap_filter = st.slider("💧 最小卖一容量过滤 ($)", 0.0, 100.0, 0.0, 1.0, help="0 表示显示所有结果（哪怕只有 $0.1）")
         with c3:
             st.write("")
             st.write("")
@@ -412,7 +406,9 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                         "策略": cand['strategy_name'],
                         "成本": cand['cost'],
                         "收益率": cand['raw_profit'],
-                        "卖一容量": None 
+                        "Poly深度": None,
+                        "Prob深度": None,
+                        "真实容量": None 
                     })
             else:
                 status_box = st.empty()
@@ -428,15 +424,19 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     poly_side_id = cand['poly_yes_id'] if cand['strat'] == 'A' else cand['poly_no_id']
                     prob_side_id = cand['prob_no_id'] if cand['strat'] == 'A' else cand['prob_yes_id']
                     
-                    real_capacity = calculate_arb_capacity(poly_side_id, prob_side_id)
+                    # 返回的是 (real, poly, prob) 三元组
+                    (real_cap, cap_poly, cap_prob) = calculate_arb_capacity(poly_side_id, prob_side_id)
                     
-                    if real_capacity > min_cap_filter: 
+                    # 关键修改：只要大于用户设定的阈值就显示 (>= 而不是 >，确保 0也能显示)
+                    if real_cap >= min_cap_filter: 
                         final_data.append({
                             "市场": cand['question'],
                             "策略": cand['strategy_name'],
                             "成本": cand['cost'],
                             "收益率": cand['raw_profit'],
-                            "卖一容量": real_capacity
+                            "Poly深度": cap_poly,
+                            "Prob深度": cap_prob,
+                            "真实容量": real_cap
                         })
                 status_box.empty()
 
@@ -445,15 +445,17 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                 final_df = final_df.sort_values(by="收益率", ascending=False)
                 
                 if auto_depth:
-                    st.success(f"✅ 完成！发现 {len(final_df)} 个机会 (仅计算双方卖一深度)。")
+                    st.success(f"✅ 完成！发现 {len(final_df)} 个机会。")
                 else:
                     st.warning(f"⚠️ 发现 {len(final_df)} 个理论机会。")
 
                 styled_final = final_df.style.format({
                     "成本": "${:.3f}",
                     "收益率": "+{:.1%}",
-                    "卖一容量": "${:,.2f}",
-                }, na_rep="未计算")
+                    "Poly深度": "${:,.2f}",
+                    "Prob深度": "${:,.2f}",
+                    "真实容量": "${:,.2f}",
+                }, na_rep="未计算").background_gradient(subset=["真实容量"], cmap="Greens", vmin=0, vmax=100)
 
                 st.dataframe(
                     styled_final,
@@ -461,15 +463,14 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     hide_index=True,
                     column_config={
                         "策略": st.column_config.TextColumn("套利策略", width="large"),
-                        "卖一容量": st.column_config.NumberColumn(
-                            "卖一容量 (Best Ask)", 
-                            help="仅基于双方 Orderbook 第一笔卖单的金额计算。"
-                        ),
+                        "Poly深度": st.column_config.NumberColumn("Poly深度 (Ask1)", help="Polymarket 卖一档金额"),
+                        "Prob深度": st.column_config.NumberColumn("Prob深度 (Ask1)", help="Probable 卖一档金额"),
+                        "真实容量": st.column_config.NumberColumn("真实容量 (瓶颈)", help="两边取小值，即实际最大可成交额"),
                     }
                 )
             else:
                 if auto_depth:
-                    st.warning(f"🤷‍♂️ 未发现有效机会 (所有机会的卖一容量均小于 ${min_cap_filter})。")
+                    st.warning(f"🤷‍♂️ 未发现有效机会 (所有机会的容量均小于 ${min_cap_filter})。")
                 else:
                     st.info("暂无理论套利机会。")
 
