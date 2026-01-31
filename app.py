@@ -127,7 +127,7 @@ def load_and_process_data():
             progress_bar.progress(90)
 
             rows_data = [] 
-            arb_opportunities = [] # 用于存储套利机会
+            arb_opportunities = [] 
 
             for q in common_questions:
                 poly_m = poly_dict[q]
@@ -140,7 +140,6 @@ def load_and_process_data():
                     except: prices = []
                 else: prices = raw_prices
                 
-                # 提取浮点数价格 (用于计算)
                 try:
                     poly_p_yes = float(prices[0]) if len(prices) > 0 else 0.0
                     poly_p_no = float(prices[1]) if len(prices) > 1 else 0.0
@@ -157,7 +156,6 @@ def load_and_process_data():
                 prob_ids = prob_token_map.get(q, {})
                 id_yes = prob_ids.get("Yes")
                 id_no = prob_ids.get("No")
-                # API 返回的 BUY 价格即为我们买入的成本
                 prob_raw_yes = price_data.get(id_yes, {}).get("BUY", "0") if id_yes else "0"
                 prob_raw_no = price_data.get(id_no, {}).get("BUY", "0") if id_no else "0"
                 
@@ -180,14 +178,12 @@ def load_and_process_data():
                     prob_liq, prob_vol
                 ])
 
-                # --- 4. 🚀 套利检测逻辑 ---
-                # 只有当两边价格都有效 (>0) 时才检测
+                # --- 4. 套利检测逻辑 ---
                 if poly_p_yes > 0 and prob_p_no > 0:
-                    # 策略 A: Poly买Yes + Prob买No
                     cost_a = poly_p_yes + prob_p_no
-                    if cost_a < 0.99: # 留 1% 的 buffer (手续费/滑点)
+                    if cost_a < 0.99: 
                         profit_pct = (1 - cost_a) / cost_a
-                        max_cap = min(poly_liq, prob_liq) # 短板理论
+                        max_cap = min(poly_liq, prob_liq)
                         arb_opportunities.append({
                             "市场": poly_m["question"],
                             "策略": "🔵Poly(Yes) + 🟠Prob(No)",
@@ -199,7 +195,6 @@ def load_and_process_data():
                         })
 
                 if poly_p_no > 0 and prob_p_yes > 0:
-                    # 策略 B: Poly买No + Prob买Yes
                     cost_b = poly_p_no + prob_p_yes
                     if cost_b < 0.99:
                         profit_pct = (1 - cost_b) / cost_b
@@ -214,7 +209,7 @@ def load_and_process_data():
                             "理论容量": max_cap
                         })
 
-            # --- 保存主表 ---
+            # --- 保存数据 ---
             columns = pd.MultiIndex.from_tuples([
                 ("市场信息", "市场名称"),
                 ("价格 (Yes/No)", "Polymarket"),
@@ -226,7 +221,6 @@ def load_and_process_data():
             ])
             st.session_state.master_df = pd.DataFrame(rows_data, columns=columns)
 
-            # --- 保存套利表 ---
             if arb_opportunities:
                 st.session_state.arb_df = pd.DataFrame(arb_opportunities)
             else:
@@ -291,35 +285,27 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据 (共 {len(df)} 条)")
 
     # ==========================================
-    # 🚀 底部红色区域：套利机会监测
+    # 🚀 套利机会监测 (已修复 Crash 问题)
     # ==========================================
-    st.markdown("---") # 分割线
+    st.markdown("---") 
     
-    # 创建一个显眼的容器
     with st.container(border=True):
         st.subheader("🚀 套利机会扫描 (Arbitrage Opportunities)")
         
         if 'arb_df' in st.session_state and not st.session_state.arb_df.empty:
             arb_df = st.session_state.arb_df.copy()
-            
-            # 按收益率倒序排列（利润最高的排前面）
             arb_df = arb_df.sort_values(by="收益率", ascending=False)
             
-            # 样式优化
             st.info(f"💡 发现 {len(arb_df)} 个潜在套利机会！(阈值：总成本 < $0.99)")
             
-            # 格式化显示
+            # --- 修复点：移除了 background_gradient 和 bar ---
             styled_arb = arb_df.style.format({
-                "成本": "${:.3f}",         # 保留3位小数，看清微小差价
-                "收益率": "+{:.1%}",      # 显示百分比
+                "成本": "${:.3f}",
+                "收益率": "+{:.1%}",
                 "Poly池": "${:,.0f}",
                 "Prob池": "${:,.0f}",
-                "理论容量": "${:,.0f}"    # 重点关注
-            }).background_gradient(
-                subset=["收益率"], cmap="Greens" # 收益率越高越绿
-            ).bar(
-                subset=["理论容量"], color='#ffcdd2' # 容量用条形图显示
-            )
+                "理论容量": "${:,.0f}"
+            })
 
             st.dataframe(
                 styled_arb,
@@ -327,10 +313,10 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                 hide_index=True,
                 column_config={
                     "策略": st.column_config.TextColumn("套利策略", help="如何操作：在哪个平台买Yes，哪个买No"),
-                    "理论容量": st.column_config.NumberColumn("理论可套利金额 (容量)", help="受限于两边市场中流动性较小的一方 (短板效应)"),
+                    "理论容量": st.column_config.NumberColumn("理论可套利金额 (容量)", help="受限于两边市场中流动性较小的一方"),
                 }
             )
-            st.caption("⚠️ 风险提示：'理论容量' 基于流动性池估算，实际成交深度可能略低。建议小额测试。")
+            st.caption("⚠️ 风险提示：'理论容量' 基于流动性池估算。")
             
         else:
             st.success("✅ 当前暂无明显的无风险套利机会 (所有组合成本均 > $0.99)")
