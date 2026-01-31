@@ -11,7 +11,6 @@ st.markdown("显示名称完全相同的市场，并附带双边价格、流动�
 
 # ==========================================
 # 🔐 关键配置：伪装成浏览器 (User-Agent)
-# 这能通过 Probable 的反爬虫检查，获取真实价格
 # ==========================================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -83,7 +82,6 @@ def get_probable_markets():
     page = 1
     try:
         while True:
-            # 关键：带上 Headers 伪装浏览器
             resp = requests.get(url, params={"page": page, "limit": 100, "active": "true"}, headers=HEADERS, timeout=10)
             if resp.status_code != 200: break
             data = resp.json()
@@ -114,13 +112,10 @@ def get_probable_prices_batch(token_ids):
 
 # --- 4. 真实深度计算函数 ---
 def calculate_arb_capacity(poly_id, prob_id):
-    """
-    计算真实容量。
-    """
     capacity_poly = 0.0
     capacity_prob = 0.0
     
-    # 1. 获取 Polymarket 深度
+    # 1. Polymarket
     try:
         url = f"https://clob.polymarket.com/book?token_id={poly_id}"
         resp = requests.get(url, headers=HEADERS, timeout=3)
@@ -137,7 +132,7 @@ def calculate_arb_capacity(poly_id, prob_id):
                         capacity_poly += p * s
     except: pass
 
-    # 2. 获取 Probable 深度
+    # 2. Probable
     try:
         url = f"https://api.probable.markets/public/api/v1/book?token_id={prob_id}"
         resp = requests.get(url, headers=HEADERS, timeout=3)
@@ -145,7 +140,6 @@ def calculate_arb_capacity(poly_id, prob_id):
             asks = resp.json().get("asks", [])
             if asks:
                 best_p = float(asks[0][0])
-                # 过滤垃圾价格
                 if best_p > 0.005: 
                     limit_p = best_p * 1.20
                     for item in asks:
@@ -191,12 +185,10 @@ def load_and_process_data():
             poly_token_map = {} 
 
             for q in common_questions:
-                # --- Probable ID Logic (修正版) ---
                 prob_m = prob_dict[q]
                 p_outcomes = parse_outcomes(prob_m.get("outcomes"))
                 p_tokens = prob_m.get("tokens", [])
                 
-                # 优先从 tokens 列表读取，这是最稳的
                 p_yes = next((t["token_id"] for t in p_tokens if t.get("outcome") == "Yes"), None)
                 p_no = next((t["token_id"] for t in p_tokens if t.get("outcome") == "No"), None)
                 
@@ -204,7 +196,6 @@ def load_and_process_data():
                 if p_yes: all_tokens_to_fetch.append(p_yes)
                 if p_no: all_tokens_to_fetch.append(p_no)
 
-                # --- Polymarket ID Logic ---
                 poly_m = poly_dict[q]
                 poly_clob_ids = []
                 if "clobTokenIds" in poly_m:
@@ -279,7 +270,6 @@ def load_and_process_data():
                     prob_liq, prob_vol
                 ])
 
-                # 初筛逻辑
                 if (poly_p_yes > 0.005 or poly_p_no > 0.005) and (prob_p_yes > 0.005 or prob_p_no > 0.005): 
                     raw_arb_data.append({
                         "question": poly_m["question"],
@@ -364,7 +354,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据")
 
     # ==========================================
-    # 🚀 套利机会监测
+    # 🚀 套利机会监测 (无数量限制版)
     # ==========================================
     st.markdown("---") 
     
@@ -408,7 +398,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
             final_data = []
 
             if not auto_depth:
-                st.info("ℹ️ 深度计算已关闭。显示的收益率仅基于最新成交价/最优价，需自行验证深度。")
+                st.info(f"ℹ️ 深度计算已关闭。发现 {len(candidates)} 个理论机会。")
                 for cand in candidates:
                     final_data.append({
                         "市场": cand['question'],
@@ -419,10 +409,12 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     })
             else:
                 status_box = st.empty()
-                sorted_candidates = sorted(candidates, key=lambda x: x['raw_profit'], reverse=True)[:50]
+                # 关键修改：去掉了 [:50]，计算所有候选
+                sorted_candidates = sorted(candidates, key=lambda x: x['raw_profit'], reverse=True)
                 
+                total_c = len(sorted_candidates)
                 for idx, cand in enumerate(sorted_candidates):
-                    status_box.text(f"正在验算深度 ({idx+1}/{len(sorted_candidates)}): {cand['question']}...")
+                    status_box.text(f"正在验算深度 ({idx+1}/{total_c}): {cand['question']}...")
                     
                     poly_side_id = cand['poly_yes_id'] if cand['strat'] == 'A' else cand['poly_no_id']
                     prob_side_id = cand['prob_no_id'] if cand['strat'] == 'A' else cand['prob_yes_id']
