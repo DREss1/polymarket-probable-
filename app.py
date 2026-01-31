@@ -78,20 +78,24 @@ def get_probable_prices_batch(token_ids):
             print(f"Probable 价格获取失败: {e}")
     return results
 
-# --- 核心逻辑：加载数据 (只负责抓取和存原始数据) ---
+# --- 核心逻辑：加载并处理数据 ---
 def load_and_process_data():
     status_text = st.empty()
     progress_bar = st.progress(0)
     
     try:
         # Step 1
-        status_text.text("Step 1/3: 正在获取 Polymarket 数据...")
+        status_text.text("Step 1/3: 正在扫描 Polymarket 活跃市场...")
         poly = get_poly_markets()
+        # 存储统计数据
+        st.session_state['stats_poly_count'] = len(poly)
         progress_bar.progress(33)
         
         # Step 2
-        status_text.text("Step 2/3: 正在获取 Probable 数据...")
+        status_text.text("Step 2/3: 正在扫描 Probable 活跃市场...")
         prob = get_probable_markets()
+        # 存储统计数据
+        st.session_state['stats_prob_count'] = len(prob)
         progress_bar.progress(66)
 
         if not poly or not prob:
@@ -102,11 +106,14 @@ def load_and_process_data():
         poly_dict = {m["question"].strip().lower(): m for m in poly if "question" in m}
         prob_dict = {m["question"].strip().lower(): m for m in prob if "question" in m}
         common_questions = sorted(set(poly_dict.keys()) & set(prob_dict.keys()))
+        
+        # 存储匹配统计
+        st.session_state['stats_match_count'] = len(common_questions)
 
         if not common_questions:
             st.warning("没有找到名称完全相同的市场")
             st.session_state.master_df = pd.DataFrame()
-            st.session_state.raw_arb_data = [] # 清空原始数据
+            st.session_state.raw_arb_data = [] 
         else:
             status_text.text(f"Step 3/3: 正在同步 {len(common_questions)} 个市场的实时价格...")
             
@@ -127,7 +134,7 @@ def load_and_process_data():
             progress_bar.progress(90)
 
             rows_data = [] 
-            raw_arb_data = [] # 新增：用于存储原始浮点数数据，方便后续动态计算
+            raw_arb_data = [] 
 
             for q in common_questions:
                 poly_m = poly_dict[q]
@@ -170,7 +177,7 @@ def load_and_process_data():
                 prob_liq = safe_float(prob_m.get("liquidity", 0))
                 prob_vol = safe_float(prob_m.get("volume24hr", 0))
 
-                # --- 1. 填充主展示表 ---
+                # --- 填充数据 ---
                 rows_data.append([
                     poly_m["question"],
                     poly_price_str, prob_price_str,
@@ -178,8 +185,8 @@ def load_and_process_data():
                     prob_liq, prob_vol
                 ])
 
-                # --- 2. 存储原始数据 (用于动态套利计算) ---
-                if poly_p_yes > 0 or poly_p_no > 0: # 只存有效数据
+                # 存储原始数据
+                if poly_p_yes > 0 or poly_p_no > 0: 
                     raw_arb_data.append({
                         "question": poly_m["question"],
                         "poly_yes": poly_p_yes,
@@ -190,7 +197,7 @@ def load_and_process_data():
                         "prob_liq": prob_liq
                     })
 
-            # 保存主展示表
+            # 保存主表
             columns = pd.MultiIndex.from_tuples([
                 ("市场信息", "市场名称"),
                 ("价格 (Yes/No)", "Polymarket"),
@@ -201,11 +208,9 @@ def load_and_process_data():
                 ("Probable 资金数据", "24h 成交量 ($)")
             ])
             st.session_state.master_df = pd.DataFrame(rows_data, columns=columns)
-            
-            # 保存原始数据到 Session State
             st.session_state.raw_arb_data = raw_arb_data
             
-            status_text.success(f"数据加载完成！共找到 {len(common_questions)} 个相同市场。")
+            status_text.success(f"数据加载完成！")
             progress_bar.empty()
             
     except Exception as e:
@@ -213,6 +218,17 @@ def load_and_process_data():
 
 # --- 主界面 UI ---
 
+# ==========================================
+# 📊 1. 数据概览仪表盘 (新增功能)
+# ==========================================
+if 'stats_poly_count' in st.session_state:
+    col_m1, col_m2, col_m3 = st.columns(3)
+    col_m1.metric("🔵 Polymarket 活跃市场数", st.session_state['stats_poly_count'])
+    col_m2.metric("🟠 Probable 活跃市场数", st.session_state['stats_prob_count'])
+    col_m3.metric("🔗 成功匹配相同市场", st.session_state['stats_match_count'])
+    st.divider() # 加一条分割线更美观
+
+# 2. 控制区
 col_search, col_reset, col_refresh = st.columns([5, 1, 1], gap="small")
 
 with col_refresh:
@@ -225,7 +241,7 @@ with col_refresh:
 if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     df = st.session_state.master_df
     
-    # --- 1. 搜索区 ---
+    # --- 3. 搜索区 ---
     market_col_key = ("市场信息", "市场名称")
     with col_search:
         market_options = df[market_col_key].tolist()
@@ -247,7 +263,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     else:
         filtered_df = df.copy()
 
-    # --- 2. 主数据表展示 ---
+    # --- 4. 主数据表展示 ---
     format_cols = [
         ("Polymarket 资金数据", "流动性 ($)"),
         ("Polymarket 资金数据", "24h 成交量 ($)"),
@@ -264,7 +280,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据 (共 {len(df)} 条)")
 
     # ==========================================
-    # 🚀 套利机会监测 (动态阈值版)
+    # 🚀 5. 套利机会监测 (动态阈值版)
     # ==========================================
     st.markdown("---") 
     
@@ -273,7 +289,6 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
         with col_title:
             st.subheader("🚀 套利机会扫描 (Arbitrage Opportunities)")
         
-        # --- 新增功能：阈值设置滑块 ---
         with col_slider:
             min_profit = st.slider(
                 "设置最小套利利润率 (%)", 
@@ -281,10 +296,8 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                 max_value=20.0, 
                 value=1.0, 
                 step=0.1,
-                help="过滤掉利润低于此值的机会。例如 1.0% 意味着两边总成本需低于 $0.99"
             )
         
-        # 动态计算逻辑
         arb_opportunities = []
         if 'raw_arb_data' in st.session_state and st.session_state.raw_arb_data:
             threshold_cost = 1.0 - (min_profit / 100.0)
@@ -327,7 +340,6 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
             
             st.info(f"💡 在 {min_profit}% 利润门槛下，发现 {len(arb_df)} 个套利机会！(总成本 < ${threshold_cost:.3f})")
             
-            # 使用基础 Pandas Styler (不含 matplotlib 依赖)
             styled_arb = arb_df.style.format({
                 "成本": "${:.3f}",
                 "收益率": "+{:.1%}",
