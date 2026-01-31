@@ -104,7 +104,6 @@ def get_probable_prices_batch(token_ids):
 def calculate_arb_capacity(poly_id, prob_id):
     """
     计算两边都能成交的最小深度。
-    为了更宽容地捕捉机会，这里统计 Ask Price * 1.2 (20%滑点) 范围内的所有挂单。
     """
     capacity_poly = 0.0
     capacity_prob = 0.0
@@ -116,7 +115,6 @@ def calculate_arb_capacity(poly_id, prob_id):
         if resp.status_code == 200:
             asks = resp.json().get("asks", [])
             if asks:
-                # 统计当前 BestAsk 往上 20% 价格区间内的所有深度
                 best_p = float(asks[0]["price"])
                 limit_p = best_p * 1.20 
                 for item in asks:
@@ -350,7 +348,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
         with c2:
             st.write("")
             st.write("")
-            # 修改 1: 默认设置为 False (关闭自动计算)
+            # 默认为 False (关闭自动计算)
             auto_depth = st.toggle("⚡ 自动计算真实套利容量 (Auto-Calc Depth)", value=False)
 
         if 'raw_arb_data' in st.session_state and st.session_state.raw_arb_data:
@@ -401,6 +399,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
             else:
                 # 开启状态：计算深度，并过滤掉垃圾机会
                 status_box = st.empty()
+                # 限制计算前 50 个
                 sorted_candidates = sorted(candidates, key=lambda x: x['raw_profit'], reverse=True)[:50]
                 
                 for idx, cand in enumerate(sorted_candidates):
@@ -411,7 +410,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     
                     real_capacity = calculate_arb_capacity(poly_side_id, prob_side_id)
                     
-                    # 修改 3: 核心过滤！如果真实容量 < $1，直接丢弃，不显示！
+                    # 核心过滤：如果真实容量 <= $1，直接丢弃
                     if real_capacity > 1.0: 
                         final_data.append({
                             "市场": cand['question'],
@@ -437,8 +436,26 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     "成本": "${:.3f}",
                     "收益率": "+{:.1%}",
                     "真实可套利金额": "${:,.2f}",
-                }, na_rep="未计算") # None 显示为 "未计算"
+                }, na_rep="未计算")
 
                 st.dataframe(
                     styled_final,
-                    use_container_width=True
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "策略": st.column_config.TextColumn("套利策略", width="large"),
+                        "真实可套利金额": st.column_config.NumberColumn(
+                            "真实可套利金额 (容量)", 
+                            help="基于真实 Orderbook 深度计算。"
+                        ),
+                    }
+                )
+            else:
+                if auto_depth:
+                    st.warning("🤷‍♂️ 未发现有效套利机会 (所有理论机会的真实深度均小于 $1)。")
+                else:
+                    st.info("暂无理论套利机会。")
+
+else:
+    with col_search:
+        st.info("👈 请点击右侧的 '刷新数据' 按钮开始全量抓取。")
