@@ -19,10 +19,13 @@ HEADERS = {
     "Origin": "https://probable.markets"
 }
 
-# --- 0. 初始化 Session State ---
+# --- 0. 初始化 Session State (缓存层) ---
 if 'stats_poly_count' not in st.session_state: st.session_state['stats_poly_count'] = 0
 if 'stats_prob_count' not in st.session_state: st.session_state['stats_prob_count'] = 0
 if 'stats_match_count' not in st.session_state: st.session_state['stats_match_count'] = 0
+
+# 🔥 新增：深度数据缓存池，防止滑块拖动时重复请求
+if 'depth_cache' not in st.session_state: st.session_state['depth_cache'] = {}
 
 # ==========================================
 # 📊 顶部常驻仪表盘
@@ -110,12 +113,20 @@ def get_probable_prices_batch(token_ids):
             pass
     return results
 
-# --- 4. 真实深度计算函数 ---
+# --- 4. 真实深度计算函数 (带智能缓存) ---
 def calculate_arb_capacity(poly_id, prob_id):
+    # 1. 生成唯一缓存键
+    cache_key = f"{poly_id}_{prob_id}"
+    
+    # 2. 如果内存里已经算过了，直接返回，不再请求网络！
+    if cache_key in st.session_state['depth_cache']:
+        return st.session_state['depth_cache'][cache_key]
+
+    # 3. 没算过，开始请求
     capacity_poly = 0.0
     capacity_prob = 0.0
     
-    # 1. Polymarket
+    # Polymarket Depth
     try:
         url = f"https://clob.polymarket.com/book?token_id={poly_id}"
         resp = requests.get(url, headers=HEADERS, timeout=3)
@@ -132,7 +143,7 @@ def calculate_arb_capacity(poly_id, prob_id):
                         capacity_poly += p * s
     except: pass
 
-    # 2. Probable
+    # Probable Depth
     try:
         url = f"https://api.probable.markets/public/api/v1/book?token_id={prob_id}"
         resp = requests.get(url, headers=HEADERS, timeout=3)
@@ -149,10 +160,18 @@ def calculate_arb_capacity(poly_id, prob_id):
                         capacity_prob += p * s
     except: pass
     
-    return min(capacity_poly, capacity_prob)
+    real_cap = min(capacity_poly, capacity_prob)
+    
+    # 4. 存入缓存
+    st.session_state['depth_cache'][cache_key] = real_cap
+    
+    return real_cap
 
 # --- 核心逻辑 ---
 def load_and_process_data():
+    # 刷新时清空深度缓存，确保数据新鲜
+    st.session_state['depth_cache'] = {}
+    
     status_text = st.empty()
     progress_bar = st.progress(0)
     
@@ -311,7 +330,7 @@ col_search, col_reset, col_refresh = st.columns([5, 1, 1], gap="small")
 with col_refresh:
     st.write("") 
     st.write("") 
-    if st.button("🔄 刷新数据", type="primary", use_container_width=True):
+    if st.button("🔄 刷新数据 (并清空缓存)", type="primary", use_container_width=True):
         load_and_process_data()
 
 if 'master_df' in st.session_state and not st.session_state.master_df.empty:
@@ -354,7 +373,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据")
 
     # ==========================================
-    # 🚀 套利机会监测 (无数量限制版)
+    # 🚀 套利机会监测 (带智能缓存版)
     # ==========================================
     st.markdown("---") 
     
@@ -409,16 +428,23 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     })
             else:
                 status_box = st.empty()
-                # 关键修改：去掉了 [:50]，计算所有候选
+                # 按照利润排序
                 sorted_candidates = sorted(candidates, key=lambda x: x['raw_profit'], reverse=True)
                 
                 total_c = len(sorted_candidates)
+                
+                # 提示信息
+                cache_size = len(st.session_state.get('depth_cache', {}))
+                st.caption(f"💾 已缓存深度数据: {cache_size} 条 (已缓存的市场将瞬间加载)")
+
                 for idx, cand in enumerate(sorted_candidates):
+                    # 动态显示进度，如果是缓存命中则非常快
                     status_box.text(f"正在验算深度 ({idx+1}/{total_c}): {cand['question']}...")
                     
                     poly_side_id = cand['poly_yes_id'] if cand['strat'] == 'A' else cand['poly_no_id']
                     prob_side_id = cand['prob_no_id'] if cand['strat'] == 'A' else cand['prob_yes_id']
                     
+                    # 这里调用带缓存的函数
                     real_capacity = calculate_arb_capacity(poly_side_id, prob_side_id)
                     
                     if real_capacity > 1.0: 
