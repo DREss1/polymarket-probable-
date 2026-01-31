@@ -100,11 +100,10 @@ def get_probable_prices_batch(token_ids):
             pass
     return results
 
-# --- 4. 真实深度计算函数 (核心修改：计算盈亏平衡点前的所有容量) ---
+# --- 4. 真实深度计算函数 ---
 def calculate_arb_capacity(poly_id, prob_id, threshold_price):
     """
-    分别获取两边的 Orderbook，计算在总成本 < 1.0 (或阈值) 的前提下，
-    两边能同时买入的最大金额 (取小值)。
+    计算真实容量，不依赖 matplotlib
     """
     capacity_poly = 0.0
     capacity_prob = 0.0
@@ -115,11 +114,8 @@ def calculate_arb_capacity(poly_id, prob_id, threshold_price):
         resp = requests.get(url, timeout=2)
         if resp.status_code == 200:
             asks = resp.json().get("asks", [])
-            # 累加所有价格合理的单子 (这里简化处理：统计 BestAsk 周围的单子)
-            # 更严谨的算法需要两边 Orderbook 对冲计算，这里取一个近似值：
-            # 只要单价 < (1 - 对方BestAsk)，就算有效深度
             if asks:
-                limit_p = float(asks[0]["price"]) * 1.05 # 允许5%滑点作为统计口径
+                limit_p = float(asks[0]["price"]) * 1.05 
                 for item in asks:
                     p = float(item["price"])
                     s = float(item["size"])
@@ -250,7 +246,7 @@ def load_and_process_data():
                     prob_liq, prob_vol
                 ])
 
-                # 存储所有有效价格数据，不在这里做任何过滤
+                # 存储所有有效价格数据
                 if poly_p_yes > 0 or poly_p_no > 0: 
                     raw_arb_data.append({
                         "question": poly_m["question"],
@@ -337,21 +333,19 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据")
 
     # ==========================================
-    # 🚀 套利机会监测 (自动深度计算版)
+    # 🚀 套利机会监测 (自动深度计算 - 修复版)
     # ==========================================
     st.markdown("---") 
     
     with st.container(border=True):
         st.subheader("🚀 套利机会扫描 (Arbitrage)")
         
-        # 布局：滑块 + 开关
         c1, c2 = st.columns([2, 1])
         with c1:
             min_profit = st.slider("💰 最小利润率 (%) - 设置为 0 可查看所有机会", 0.0, 50.0, 0.0, 0.1)
         with c2:
             st.write("")
             st.write("")
-            # 默认为开启状态，自动计算
             auto_depth = st.toggle("⚡ 自动计算真实套利容量 (Auto-Calc Depth)", value=True)
 
         if 'raw_arb_data' in st.session_state and st.session_state.raw_arb_data:
@@ -359,9 +353,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
             
             candidates = []
             
-            # 1. 快速筛选出符合价格要求的市场
             for item in st.session_state.raw_arb_data:
-                # 移除所有最低价格过滤，只要有价格就计算
                 if item['poly_yes'] <= 0 or item['prob_no'] <= 0 or item['poly_no'] <= 0 or item['prob_yes'] <= 0:
                     continue
 
@@ -375,13 +367,11 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                 if cost_b < threshold_cost:
                     candidates.append({**item, "strat": "B", "cost": cost_b, "raw_profit": (1-cost_b)/cost_b})
 
-            # 2. 如果开启了自动深度计算，且有候选人
             if auto_depth and candidates:
-                # 限制并发数量防止卡顿，如果是大量数据可能需要进度条
                 status_box = st.empty()
                 verified_data = []
                 
-                # 只计算前 50 个利润最高的机会，防止浏览器卡死
+                # 限制计算前 50 个以防卡顿
                 sorted_candidates = sorted(candidates, key=lambda x: x['raw_profit'], reverse=True)[:50]
                 
                 for idx, cand in enumerate(sorted_candidates):
@@ -390,7 +380,6 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     poly_side_id = cand['poly_yes_id'] if cand['strat'] == 'A' else cand['poly_no_id']
                     prob_side_id = cand['prob_no_id'] if cand['strat'] == 'A' else cand['prob_yes_id']
                     
-                    # 调用深度计算
                     real_capacity = calculate_arb_capacity(poly_side_id, prob_side_id, 0)
                     
                     name_buy = cand['outcome_a'] if cand['strat']=='A' else cand['outcome_b']
@@ -413,11 +402,13 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     
                     st.success(f"✅ 发现 {len(final_df)} 个理论套利机会！(已按真实 Orderbook 计算容量)")
                     
+                    # --- 修复点：移除 background_gradient ---
                     styled_final = final_df.style.format({
                         "成本": "${:.3f}",
                         "收益率": "+{:.1%}",
-                        "真实可套利金额": "${:,.2f}" # 保留2位小数，精确显示 $0.20
-                    }).background_gradient(subset=["真实可套利金额"], cmap="Reds") # 颜色高亮容量
+                        "真实可套利金额": "${:,.2f}"
+                    })
+                    # -------------------------------------
 
                     st.dataframe(
                         styled_final,
@@ -432,7 +423,6 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     st.info("没有满足利润要求的机会。")
             
             elif candidates and not auto_depth:
-                # 如果没开自动计算，显示简略版
                 st.warning("⚠️ 深度计算已关闭。显示的仅为理论价格机会，未验证真实容量。")
                 preview_df = pd.DataFrame(candidates)
                 st.dataframe(preview_df[["question", "cost", "raw_profit"]].sort_values("raw_profit", ascending=False))
