@@ -9,13 +9,9 @@ st.set_page_config(page_title="Polymarket vs Probable 市场对比", page_icon="
 st.title("Polymarket vs Probable 相同市场名称对比工具")
 st.markdown("显示名称完全相同的市场，并附带双边价格、流动性与成交量对比")
 
-# --- 0. 初始化 Session State ---
-if 'stats_poly_count' not in st.session_state: st.session_state['stats_poly_count'] = 0
-if 'stats_prob_count' not in st.session_state: st.session_state['stats_prob_count'] = 0
-if 'stats_match_count' not in st.session_state: st.session_state['stats_match_count'] = 0
-
 # ==========================================
-# 🔐 关键修复：伪装成浏览器 (User-Agent)
+# 🔐 关键配置：伪装成浏览器 (User-Agent)
+# 这能通过 Probable 的反爬虫检查，获取真实价格
 # ==========================================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -23,6 +19,11 @@ HEADERS = {
     "Referer": "https://probable.markets/",
     "Origin": "https://probable.markets"
 }
+
+# --- 0. 初始化 Session State ---
+if 'stats_poly_count' not in st.session_state: st.session_state['stats_poly_count'] = 0
+if 'stats_prob_count' not in st.session_state: st.session_state['stats_prob_count'] = 0
+if 'stats_match_count' not in st.session_state: st.session_state['stats_match_count'] = 0
 
 # ==========================================
 # 📊 顶部常驻仪表盘
@@ -64,7 +65,6 @@ def get_poly_markets():
     offset = 0
     try:
         while True:
-            # 加上 Headers 以防万一
             resp = requests.get(url, params={**params, "offset": offset}, headers=HEADERS, timeout=10)
             if resp.status_code != 200: break 
             data = resp.json()
@@ -83,7 +83,7 @@ def get_probable_markets():
     page = 1
     try:
         while True:
-            # 关键修复：这里必须带 Headers
+            # 关键：带上 Headers 伪装浏览器
             resp = requests.get(url, params={"page": page, "limit": 100, "active": "true"}, headers=HEADERS, timeout=10)
             if resp.status_code != 200: break
             data = resp.json()
@@ -105,7 +105,6 @@ def get_probable_prices_batch(token_ids):
         chunk = token_ids[i:i+chunk_size]
         payload = [{"token_id": t, "side": "BUY"} for t in chunk]
         try:
-            # 关键修复：这里必须带 Headers
             resp = requests.post(url, json=payload, headers=HEADERS, timeout=5)
             if resp.status_code == 200:
                 results.update(resp.json())
@@ -113,7 +112,7 @@ def get_probable_prices_batch(token_ids):
             pass
     return results
 
-# --- 4. 真实深度计算函数 (带 Headers) ---
+# --- 4. 真实深度计算函数 ---
 def calculate_arb_capacity(poly_id, prob_id):
     """
     计算真实容量。
@@ -141,7 +140,6 @@ def calculate_arb_capacity(poly_id, prob_id):
     # 2. 获取 Probable 深度
     try:
         url = f"https://api.probable.markets/public/api/v1/book?token_id={prob_id}"
-        # 关键修复：Headers! Headers! Headers!
         resp = requests.get(url, headers=HEADERS, timeout=3)
         if resp.status_code == 200:
             asks = resp.json().get("asks", [])
@@ -193,12 +191,12 @@ def load_and_process_data():
             poly_token_map = {} 
 
             for q in common_questions:
-                # --- Probable ID Logic (基于您的截图修复) ---
+                # --- Probable ID Logic (修正版) ---
                 prob_m = prob_dict[q]
                 p_outcomes = parse_outcomes(prob_m.get("outcomes"))
                 p_tokens = prob_m.get("tokens", [])
                 
-                # 直接从 tokens 列表读取，这是最稳的，因为您截图证实 id 在这里是正确的
+                # 优先从 tokens 列表读取，这是最稳的
                 p_yes = next((t["token_id"] for t in p_tokens if t.get("outcome") == "Yes"), None)
                 p_no = next((t["token_id"] for t in p_tokens if t.get("outcome") == "No"), None)
                 
@@ -281,7 +279,7 @@ def load_and_process_data():
                     prob_liq, prob_vol
                 ])
 
-                # 价格 > 0.005 才进入候选
+                # 初筛逻辑
                 if (poly_p_yes > 0.005 or poly_p_no > 0.005) and (prob_p_yes > 0.005 or prob_p_no > 0.005): 
                     raw_arb_data.append({
                         "question": poly_m["question"],
@@ -366,7 +364,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据")
 
     # ==========================================
-    # 🚀 套利机会监测 (Headers 修复版)
+    # 🚀 套利机会监测
     # ==========================================
     st.markdown("---") 
     
@@ -379,7 +377,6 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
         with c2:
             st.write("")
             st.write("")
-            # 默认为 False
             auto_depth = st.toggle("⚡ 自动计算真实套利容量 (Auto-Calc Depth)", value=False)
 
         if 'raw_arb_data' in st.session_state and st.session_state.raw_arb_data:
@@ -387,11 +384,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
             
             candidates = []
             
-            # 1. 快速筛选
             for item in st.session_state.raw_arb_data:
-                if item['poly_yes'] <= 0 or item['prob_no'] <= 0 or item['poly_no'] <= 0 or item['prob_yes'] <= 0:
-                    continue
-
                 name_buy = ""
                 name_sell = ""
                 strat_name = ""
@@ -412,23 +405,20 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     strat_name = f"🔵Poly({name_buy}) + 🟠Prob({name_sell})"
                     candidates.append({**item, "strat": "B", "cost": cost_b, "raw_profit": (1-cost_b)/cost_b, "strategy_name": strat_name})
 
-            # 准备数据框架
             final_data = []
 
-            # 2. 逻辑分支：开/关
             if not auto_depth:
-                st.info("ℹ️ 深度计算已关闭。显示的收益率仅基于最新成交价/最优价。")
+                st.info("ℹ️ 深度计算已关闭。显示的收益率仅基于最新成交价/最优价，需自行验证深度。")
                 for cand in candidates:
                     final_data.append({
                         "市场": cand['question'],
                         "策略": cand['strategy_name'],
                         "成本": cand['cost'],
                         "收益率": cand['raw_profit'],
-                        "真实可套利金额": None # 标记为 None
+                        "真实可套利金额": None 
                     })
             else:
                 status_box = st.empty()
-                # 限制计算前 50 个
                 sorted_candidates = sorted(candidates, key=lambda x: x['raw_profit'], reverse=True)[:50]
                 
                 for idx, cand in enumerate(sorted_candidates):
@@ -439,7 +429,6 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     
                     real_capacity = calculate_arb_capacity(poly_side_id, prob_side_id)
                     
-                    # 核心过滤：如果真实容量 <= $1，直接丢弃
                     if real_capacity > 1.0: 
                         final_data.append({
                             "市场": cand['question'],
@@ -450,7 +439,6 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                         })
                 status_box.empty()
 
-            # 3. 统一渲染表格
             if final_data:
                 final_df = pd.DataFrame(final_data)
                 final_df = final_df.sort_values(by="收益率", ascending=False)
@@ -458,7 +446,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                 if auto_depth:
                     st.success(f"✅ 验算完成！发现 {len(final_df)} 个真实有效的套利机会。")
                 else:
-                    st.warning(f"⚠️ 发现 {len(final_df)} 个理论机会。请打开上方开关以验证真实性。")
+                    st.warning(f"⚠️ 发现 {len(final_df)} 个理论机会。")
 
                 styled_final = final_df.style.format({
                     "成本": "${:.3f}",
