@@ -17,7 +17,7 @@ def safe_float(val):
     except:
         return 0.0
 
-# --- 回调函数：用于一键清空搜索框 ---
+# --- 回调函数：一键清空 ---
 def clear_selection():
     st.session_state["market_select"] = None
 
@@ -130,7 +130,7 @@ def load_and_process_data():
                 poly_m = poly_dict[q]
                 prob_m = prob_dict[q]
 
-                # --- 1. Polymarket 价格 & 数据 (新增部分) ---
+                # --- 1. Polymarket 价格 & 数据 ---
                 poly_price_str = "N/A"
                 raw_prices = poly_m.get("outcomePrices", [])
                 if isinstance(raw_prices, str):
@@ -144,12 +144,10 @@ def load_and_process_data():
                     poly_price_str = f"{p_yes:.1%} / {p_no:.1%}"
                 except: poly_price_str = "Err"
 
-                # 提取 Poly 流动性与成交量
-                # 注意：Polymarket API 有时返回 'volume' (总) 有时有 'volume24hr'，优先取 24h
                 poly_liq = safe_float(poly_m.get("liquidity", 0))
-                poly_vol = safe_float(poly_m.get("volume24hr", 0)) 
+                # 优先取 volume24hr，没有则取 volume (防止为0)
+                poly_vol = safe_float(poly_m.get("volume24hr", 0))
                 if poly_vol == 0:
-                     # 如果没有 24h 字段，回退到 total volume
                      poly_vol = safe_float(poly_m.get("volume", 0))
 
                 # --- 2. Probable 价格 ---
@@ -165,21 +163,21 @@ def load_and_process_data():
                     prob_price_str = f"{pr_yes:.1%} / {pr_no:.1%}"
                 except: prob_price_str = "N/A"
 
-                # --- 3. Probable 流动性与成交量 ---
+                # --- 3. Probable 数据 ---
                 prob_liq = safe_float(prob_m.get("liquidity", 0))
                 prob_vol = safe_float(prob_m.get("volume24hr", 0))
 
                 rows.append({
                     "市场名称": poly_m["question"],
                     "Poly 价格 (Y/N)": poly_price_str,
-                    "Poly 流动性": poly_liq,  # 新增
-                    "Poly 24h量": poly_vol,    # 新增
+                    "Poly 流动性": poly_liq,
+                    "Poly 24h量": poly_vol,
                     "Prob 价格 (Y/N)": prob_price_str,
                     "Prob 流动性": prob_liq,
                     "Prob 24h量": prob_vol
                 })
 
-            # 强制指定列顺序 (扩充了 Poly 的列)
+            # 指定列顺序
             cols_order = [
                 "市场名称", 
                 "Poly 价格 (Y/N)", "Poly 流动性", "Poly 24h量",
@@ -200,7 +198,7 @@ col_search, col_reset, col_refresh = st.columns([5, 1, 1], gap="small")
 with col_refresh:
     st.write("") 
     st.write("") 
-    if st.button("🔄 刷新全量数据", type="primary", use_container_width=True):
+    if st.button("🔄 刷新数据", type="primary", use_container_width=True):
         load_and_process_data()
 
 if 'master_df' in st.session_state and not st.session_state.master_df.empty:
@@ -212,32 +210,40 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
             "🔍 搜索/筛选市场 (输入关键词自动联想)", 
             options=market_options,
             index=None,
-            key="market_select",
+            key="market_select", # 绑定 Key 用于清空
             placeholder="输入关键词...",
-            help="输入关键词定位特定市场。"
+            help="在这里输入关键词，下方表格会自动定位到对应市场。"
         )
 
     with col_reset:
         st.write("")
         st.write("")
+        # 【解决问题1】使用按钮回调来清空搜索框
         st.button("❌ 重置筛选", on_click=clear_selection, use_container_width=True, help="点击这里一键清空搜索框")
 
+    # 【解决问题2】如果搜索框为空，则显示全部数据 (df.copy())
     if selected_market:
         filtered_df = df[df["市场名称"] == selected_market].copy()
         st.info(f"📍 已定位: {selected_market}")
     else:
         filtered_df = df.copy()
 
-    # 样式升级：对所有金额列（Poly 和 Prob）都应用左对齐和千分位格式
+    # 【解决问题3】使用 Styler 强制居中对齐 (Center Align)
+    # 居中是标题和数字视觉上最不容易错位的方案
+    align_cols = ["Poly 流动性", "Poly 24h量", "Prob 流动性", "Prob 24h量"]
+    
     styled_df = filtered_df.style.format({
         "Poly 流动性": "${:,.0f}",
         "Poly 24h量": "${:,.0f}",
         "Prob 流动性": "${:,.0f}",
         "Prob 24h量": "${:,.0f}"
     }).set_properties(
-        subset=["Poly 流动性", "Poly 24h量", "Prob 流动性", "Prob 24h量"], 
-        **{'text-align': 'left'} # 强制所有数字列左对齐
-    )
+        subset=align_cols, 
+        **{'text-align': 'center'} # 核心修改：强制居中
+    ).set_table_styles([
+        # 尝试强制表头也居中 (Streamlit 有时会覆盖这个，但值得一试)
+        {'selector': 'th', 'props': [('text-align', 'center')]}
+    ])
 
     st.dataframe(
         styled_df, 
@@ -249,4 +255,4 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
 
 else:
     with col_search:
-        st.info("👈 请点击右侧的 '刷新全量数据' 按钮开始抓取。")
+        st.info("👈 请点击右侧的 '刷新数据' 按钮开始抓取。")
