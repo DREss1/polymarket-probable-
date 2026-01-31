@@ -8,7 +8,7 @@ st.set_page_config(page_title="Polymarket vs Probable 市场对比", page_icon="
 st.title("Polymarket vs Probable 相同市场名称对比工具")
 st.markdown("显示名称完全相同的市场，并附带双边价格、流动性与成交量对比")
 
-# --- 0. 初始化统计数据的 Session State (关键修复：保证仪表盘始终可见) ---
+# --- 0. 初始化统计数据的 Session State ---
 if 'stats_poly_count' not in st.session_state:
     st.session_state['stats_poly_count'] = 0
 if 'stats_prob_count' not in st.session_state:
@@ -17,17 +17,15 @@ if 'stats_match_count' not in st.session_state:
     st.session_state['stats_match_count'] = 0
 
 # ==========================================
-# 📊 顶部常驻仪表盘 (直接显示，不再隐藏)
+# 📊 顶部常驻仪表盘
 # ==========================================
-# 使用容器包裹，增加背景色或边框让它更显眼
 with st.container(border=True):
     col_m1, col_m2, col_m3 = st.columns(3)
-    # 这里直接读取 Session State，确保随时有数
     col_m1.metric("🔵 Polymarket 活跃市场扫描", st.session_state['stats_poly_count'], help="本次扫描到的 Polymarket 活跃市场总数")
     col_m2.metric("🟠 Probable 活跃市场扫描", st.session_state['stats_prob_count'], help="本次扫描到的 Probable 活跃市场总数")
     col_m3.metric("🔗 成功匹配相同市场", st.session_state['stats_match_count'], help="两个平台名称完全一致的市场数量")
 
-# --- 辅助函数：安全转换浮点数 ---
+# --- 辅助函数 ---
 def safe_float(val):
     try:
         if val is None or val == "":
@@ -36,14 +34,14 @@ def safe_float(val):
     except:
         return 0.0
 
-# --- 回调函数：一键清空 ---
 def clear_selection():
     st.session_state["market_select"] = None
 
-# --- 1. 获取 Polymarket 数据 ---
+# --- 1. 获取 Polymarket 数据 (无限制版) ---
 @st.cache_data(ttl=600)
 def get_poly_markets():
     url = "https://gamma-api.polymarket.com/markets"
+    # 保持 active=true，确保只抓活跃市场
     params = {"active": "true", "closed": "false", "limit": 500}
     markets = []
     offset = 0
@@ -55,12 +53,15 @@ def get_poly_markets():
             if not data: break
             markets.extend(data)
             offset += 500
-            if offset > 5000: break 
+            
+            # 【核心修改】：移除了 if offset > 5000: break
+            # 现在会一直抓取直到 data 为空
+            
     except Exception as e:
         st.error(f"Polymarket 数据拉取失败: {e}")
     return markets
 
-# --- 2. 获取 Probable 市场列表 ---
+# --- 2. 获取 Probable 市场列表 (无限制版) ---
 @st.cache_data(ttl=600)
 def get_probable_markets():
     url = "https://market-api.probable.markets/public/api/v1/markets/"
@@ -75,7 +76,10 @@ def get_probable_markets():
             if not new: break
             markets.extend(new)
             page += 1
-            if page > 50: break
+            
+            # 【核心修改】：移除了 if page > 50: break
+            # 现在会一直翻页直到没有新数据
+            
     except Exception as e:
         st.error(f"Probable 列表拉取失败: {e}")
     return markets
@@ -104,15 +108,15 @@ def load_and_process_data():
     
     try:
         # Step 1: 扫描 Poly
-        status_text.text("Step 1/3: 正在扫描 Polymarket 活跃市场...")
+        status_text.text("Step 1/3: 正在扫描 Polymarket 全量活跃市场 (可能需要1-2分钟)...")
         poly = get_poly_markets()
-        st.session_state['stats_poly_count'] = len(poly) # 更新统计
+        st.session_state['stats_poly_count'] = len(poly)
         progress_bar.progress(33)
         
         # Step 2: 扫描 Prob
-        status_text.text("Step 2/3: 正在扫描 Probable 活跃市场...")
+        status_text.text("Step 2/3: 正在扫描 Probable 全量活跃市场...")
         prob = get_probable_markets()
-        st.session_state['stats_prob_count'] = len(prob) # 更新统计
+        st.session_state['stats_prob_count'] = len(prob)
         progress_bar.progress(66)
 
         if not poly or not prob:
@@ -124,10 +128,7 @@ def load_and_process_data():
         prob_dict = {m["question"].strip().lower(): m for m in prob if "question" in m}
         common_questions = sorted(set(poly_dict.keys()) & set(prob_dict.keys()))
         
-        st.session_state['stats_match_count'] = len(common_questions) # 更新统计
-
-        # 强制刷新页面以显示最新的顶部数字 (可选，但在 Streamlit 中通常由 rerun 触发)
-        # 这里我们依靠下面的 UI 渲染更新，或者用户下次交互更新
+        st.session_state['stats_match_count'] = len(common_questions)
 
         if not common_questions:
             st.warning("没有找到名称完全相同的市场")
@@ -229,10 +230,9 @@ def load_and_process_data():
             st.session_state.master_df = pd.DataFrame(rows_data, columns=columns)
             st.session_state.raw_arb_data = raw_arb_data
             
-            status_text.success(f"数据加载完成！")
+            status_text.success(f"全量数据扫描完成！")
             progress_bar.empty()
             
-            # 触发一次 Rerun 以立即更新顶部的数字
             st.rerun()
 
     except Exception as e:
@@ -252,7 +252,7 @@ with col_refresh:
 if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     df = st.session_state.master_df
     
-    # --- 3. 搜索区 ---
+    # --- 搜索区 ---
     market_col_key = ("市场信息", "市场名称")
     with col_search:
         market_options = df[market_col_key].tolist()
@@ -274,7 +274,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     else:
         filtered_df = df.copy()
 
-    # --- 4. 主数据表展示 ---
+    # --- 主数据表展示 ---
     format_cols = [
         ("Polymarket 资金数据", "流动性 ($)"),
         ("Polymarket 资金数据", "24h 成交量 ($)"),
@@ -291,7 +291,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据 (共 {len(df)} 条)")
 
     # ==========================================
-    # 🚀 5. 套利机会监测 (动态阈值版)
+    # 🚀 套利机会监测 (动态阈值版)
     # ==========================================
     st.markdown("---") 
     
@@ -373,4 +373,4 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
 
 else:
     with col_search:
-        st.info("👈 请点击右侧的 '刷新数据' 按钮开始抓取。")
+        st.info("👈 请点击右侧的 '刷新数据' 按钮开始全量抓取。")
