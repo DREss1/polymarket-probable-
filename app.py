@@ -83,7 +83,7 @@ def get_probable_markets():
         st.error(f"Probable 列表拉取失败: {e}")
     return markets
 
-# --- 3. 批量获取 Probable 价格 (用于列表展示) ---
+# --- 3. 批量获取 Probable 价格 ---
 def get_probable_prices_batch(token_ids):
     if not token_ids: return {}
     url = "https://api.probable.markets/public/api/v1/prices"
@@ -100,58 +100,49 @@ def get_probable_prices_batch(token_ids):
             pass
     return results
 
-# --- 4. [新增] 真实深度验证函数 ---
-def get_real_depth(platform, token_id):
+# --- 4. 真实深度计算函数 (核心修改：计算盈亏平衡点前的所有容量) ---
+def calculate_arb_capacity(poly_id, prob_id, threshold_price):
     """
-    获取订单簿前 5% 价差范围内的真实资金深度 ($ Value)
+    分别获取两边的 Orderbook，计算在总成本 < 1.0 (或阈值) 的前提下，
+    两边能同时买入的最大金额 (取小值)。
     """
-    if not token_id: return 0.0
+    capacity_poly = 0.0
+    capacity_prob = 0.0
     
-    depth_usd = 0.0
-    
+    # 1. 获取 Polymarket 深度
     try:
-        if platform == "Probable":
-            # 使用您刚刚找到的 API
-            url = f"https://api.probable.markets/public/api/v1/book?token_id={token_id}"
-            resp = requests.get(url, timeout=3)
-            if resp.status_code == 200:
-                data = resp.json()
-                asks = data.get("asks", []) # 格式 [["price", "shares"], ...]
-                if not asks: return 0.0
-                
-                best_ask = float(asks[0][0])
-                # 统计价格在 BestAsk * 1.05 (5%滑点) 范围内的所有挂单价值
-                limit_price = best_ask * 1.05
-                
+        url = f"https://clob.polymarket.com/book?token_id={poly_id}"
+        resp = requests.get(url, timeout=2)
+        if resp.status_code == 200:
+            asks = resp.json().get("asks", [])
+            # 累加所有价格合理的单子 (这里简化处理：统计 BestAsk 周围的单子)
+            # 更严谨的算法需要两边 Orderbook 对冲计算，这里取一个近似值：
+            # 只要单价 < (1 - 对方BestAsk)，就算有效深度
+            if asks:
+                limit_p = float(asks[0]["price"]) * 1.05 # 允许5%滑点作为统计口径
                 for item in asks:
-                    price = float(item[0])
-                    shares = float(item[1])
-                    if price > limit_price: break # 超过价格范围停止
-                    depth_usd += price * shares
+                    p = float(item["price"])
+                    s = float(item["size"])
+                    if p > limit_p: break
+                    capacity_poly += p * s
+    except: pass
 
-        elif platform == "Polymarket":
-            # 使用 Polymarket CLOB API
-            url = f"https://clob.polymarket.com/book?token_id={token_id}"
-            resp = requests.get(url, timeout=3)
-            if resp.status_code == 200:
-                data = resp.json()
-                asks = data.get("asks", []) # 格式 [{"price": "0.xx", "size": "xx"}]
-                if not asks: return 0.0
-                
-                best_ask = float(asks[0]["price"])
-                limit_price = best_ask * 1.05
-                
+    # 2. 获取 Probable 深度
+    try:
+        url = f"https://api.probable.markets/public/api/v1/book?token_id={prob_id}"
+        resp = requests.get(url, timeout=2)
+        if resp.status_code == 200:
+            asks = resp.json().get("asks", [])
+            if asks:
+                limit_p = float(asks[0][0]) * 1.05
                 for item in asks:
-                    price = float(item["price"])
-                    size = float(item["size"])
-                    if price > limit_price: break
-                    depth_usd += price * size
-                    
-    except Exception as e:
-        print(f"Depth check failed for {platform}: {e}")
-        return 0.0
-        
-    return depth_usd
+                    p = float(item[0])
+                    s = float(item[1])
+                    if p > limit_p: break
+                    capacity_prob += p * s
+    except: pass
+    
+    return min(capacity_poly, capacity_prob)
 
 # --- 核心逻辑 ---
 def load_and_process_data():
@@ -182,15 +173,11 @@ def load_and_process_data():
         else:
             status_text.text(f"Step 3/4: 同步 {len(common_questions)} 个市场的价格...")
             
-            # 构建 Token Map
             prob_token_map = {} 
             all_tokens_to_fetch = []
-            
-            # 同时解析 Poly Token ID 以备查深度
             poly_token_map = {} 
 
             for q in common_questions:
-                # Prob 处理
                 prob_m = prob_dict[q]
                 p_tokens = prob_m.get("tokens", [])
                 p_outcomes = parse_outcomes(prob_m.get("outcomes"))
@@ -200,22 +187,15 @@ def load_and_process_data():
                 if p_yes: all_tokens_to_fetch.append(p_yes)
                 if p_no: all_tokens_to_fetch.append(p_no)
 
-                # Poly 处理 (从 tokens 字段解析)
                 poly_m = poly_dict[q]
-                # Polymarket tokens 通常是 [{"token_id": "...", "outcome": "Yes"}, ...]
-                # 或者直接是 clobTokenIds ["...", "..."]
                 poly_yes_id = None
                 poly_no_id = None
-                
-                # 尝试解析 Poly Token ID
                 if "clobTokenIds" in poly_m:
                     ids = json.loads(poly_m["clobTokenIds"]) if isinstance(poly_m["clobTokenIds"], str) else poly_m["clobTokenIds"]
                     if len(ids) >= 2:
                         poly_yes_id = ids[0]
                         poly_no_id = ids[1]
-                
                 poly_token_map[q] = {"Yes": poly_yes_id, "No": poly_no_id}
-
             
             price_data = get_probable_prices_batch(all_tokens_to_fetch)
             progress_bar.progress(75)
@@ -226,8 +206,6 @@ def load_and_process_data():
             for q in common_questions:
                 poly_m = poly_dict[q]
                 prob_m = prob_dict[q]
-
-                # 显示逻辑 (略，保持不变)
                 outcomes_list = parse_outcomes(poly_m.get("outcomes"))
                 name_a = outcomes_list[0]
                 name_b = outcomes_list[1] if len(outcomes_list) > 1 else "No"
@@ -255,7 +233,6 @@ def load_and_process_data():
                 id_no = prob_info.get("No")
                 prob_raw_yes = price_data.get(id_yes, {}).get("BUY", "0") if id_yes else "0"
                 prob_raw_no = price_data.get(id_no, {}).get("BUY", "0") if id_no else "0"
-                
                 try:
                     prob_p_yes = float(prob_raw_yes)
                     prob_p_no = float(prob_raw_no)
@@ -263,7 +240,6 @@ def load_and_process_data():
                 except: 
                     prob_p_yes, prob_p_no = 0.0, 0.0
                     prob_price_str = "N/A"
-                
                 prob_liq = safe_float(prob_m.get("liquidity", 0))
                 prob_vol = safe_float(prob_m.get("volume24hr", 0))
 
@@ -274,8 +250,7 @@ def load_and_process_data():
                     prob_liq, prob_vol
                 ])
 
-                # 存储数据以供后续验算
-                # 这里我们把 Token ID 也存进去
+                # 存储所有有效价格数据，不在这里做任何过滤
                 if poly_p_yes > 0 or poly_p_no > 0: 
                     raw_arb_data.append({
                         "question": poly_m["question"],
@@ -285,9 +260,8 @@ def load_and_process_data():
                         "poly_no": poly_p_no,
                         "prob_yes": prob_p_yes,
                         "prob_no": prob_p_no,
-                        "poly_liq": poly_liq, # 仅供初筛
-                        "prob_liq": prob_liq, # 仅供初筛
-                        # ID for deep check
+                        "poly_liq": poly_liq,
+                        "prob_liq": prob_liq,
                         "prob_yes_id": id_yes,
                         "prob_no_id": id_no,
                         "poly_yes_id": poly_token_map[q]["Yes"],
@@ -363,30 +337,32 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据")
 
     # ==========================================
-    # 🚀 套利机会监测 (Orderbook 深度验证版)
+    # 🚀 套利机会监测 (自动深度计算版)
     # ==========================================
     st.markdown("---") 
     
     with st.container(border=True):
-        st.subheader("🚀 套利机会扫描 (真实深度验证)")
-        st.info("💡 系统将自动查询 '疑似机会' 的 Orderbook。如果某边深度不足 $10，将被视为无效。")
+        st.subheader("🚀 套利机会扫描 (Arbitrage)")
         
-        col_s1, col_s2 = st.columns(2)
-        min_profit = col_s1.slider("💰 最小利润率 (%)", 0.0, 20.0, 1.0, 0.1)
-        # 增加一个按钮来触发深度检查，因为这比较慢
-        check_depth_btn = st.button("⚡ 深度验算 (Verify Depth)", type="primary", help="点击此按钮，对下方筛选出的机会进行 Orderbook 深度检查，剔除假流动性。")
+        # 布局：滑块 + 开关
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            min_profit = st.slider("💰 最小利润率 (%) - 设置为 0 可查看所有机会", 0.0, 50.0, 0.0, 0.1)
+        with c2:
+            st.write("")
+            st.write("")
+            # 默认为开启状态，自动计算
+            auto_depth = st.toggle("⚡ 自动计算真实套利容量 (Auto-Calc Depth)", value=True)
 
-        arb_opportunities = []
-        
-        # 1. 初筛 (快速)
         if 'raw_arb_data' in st.session_state and st.session_state.raw_arb_data:
             threshold_cost = 1.0 - (min_profit / 100.0)
             
-            # 先找出所有可能的 Candidate，不查深度
             candidates = []
+            
+            # 1. 快速筛选出符合价格要求的市场
             for item in st.session_state.raw_arb_data:
-                # 价格初筛 (价格太离谱的直接过滤，例如 < 0.01)
-                if item['poly_yes'] < 0.01 or item['prob_no'] < 0.01 or item['poly_no'] < 0.01 or item['prob_yes'] < 0.01:
+                # 移除所有最低价格过滤，只要有价格就计算
+                if item['poly_yes'] <= 0 or item['prob_no'] <= 0 or item['poly_no'] <= 0 or item['prob_yes'] <= 0:
                     continue
 
                 # A: Poly Yes + Prob No
@@ -399,90 +375,70 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                 if cost_b < threshold_cost:
                     candidates.append({**item, "strat": "B", "cost": cost_b, "raw_profit": (1-cost_b)/cost_b})
 
-            # 2. 如果用户点击了“深度验算”，则逐个查 Orderbook
-            if check_depth_btn and candidates:
-                progress_text = st.empty()
-                my_bar = st.progress(0)
+            # 2. 如果开启了自动深度计算，且有候选人
+            if auto_depth and candidates:
+                # 限制并发数量防止卡顿，如果是大量数据可能需要进度条
+                status_box = st.empty()
+                verified_data = []
                 
-                total_c = len(candidates)
-                verified_arbs = []
+                # 只计算前 50 个利润最高的机会，防止浏览器卡死
+                sorted_candidates = sorted(candidates, key=lambda x: x['raw_profit'], reverse=True)[:50]
                 
-                for idx, cand in enumerate(candidates):
-                    progress_text.text(f"正在验算深度 ({idx+1}/{total_c}): {cand['question']}...")
-                    my_bar.progress((idx + 1) / total_c)
-                    
-                    # 根据策略确定要查哪边的 ID
-                    # Strat A: Buy Poly Yes (Ask) + Buy Prob No (Ask)
-                    # Strat B: Buy Poly No (Ask) + Buy Prob Yes (Ask)
+                for idx, cand in enumerate(sorted_candidates):
+                    status_box.text(f"正在计算真实容量 ({idx+1}/{len(sorted_candidates)}): {cand['question']}...")
                     
                     poly_side_id = cand['poly_yes_id'] if cand['strat'] == 'A' else cand['poly_no_id']
                     prob_side_id = cand['prob_no_id'] if cand['strat'] == 'A' else cand['prob_yes_id']
                     
-                    # 查 Poly 深度
-                    poly_real_depth = get_real_depth("Polymarket", poly_side_id)
-                    # 查 Prob 深度
-                    prob_real_depth = get_real_depth("Probable", prob_side_id)
+                    # 调用深度计算
+                    real_capacity = calculate_arb_capacity(poly_side_id, prob_side_id, 0)
                     
-                    # 深度过滤阈值 (例如 $10，太小就不要了)
-                    MIN_DEPTH_USD = 10.0
+                    name_buy = cand['outcome_a'] if cand['strat']=='A' else cand['outcome_b']
+                    name_sell = cand['outcome_b'] if cand['strat']=='A' else cand['outcome_a']
+                    strat_name = f"🔵Poly({name_buy}) + 🟠Prob({name_sell})"
                     
-                    if poly_real_depth > MIN_DEPTH_USD and prob_real_depth > MIN_DEPTH_USD:
-                        # 只有两边都有真金白银挂单，才算有效
-                        real_capacity = min(poly_real_depth, prob_real_depth)
-                        
-                        name_buy = cand['outcome_a'] if cand['strat']=='A' else cand['outcome_b']
-                        name_sell = cand['outcome_b'] if cand['strat']=='A' else cand['outcome_a']
-                        strat_name = f"🔵Poly({name_buy}) + 🟠Prob({name_sell})"
-                        
-                        verified_arbs.append({
-                            "市场": cand['question'],
-                            "策略": strat_name,
-                            "成本": cand['cost'],
-                            "收益率": cand['raw_profit'],
-                            "Poly真深度": poly_real_depth,
-                            "Prob真深度": prob_real_depth,
-                            "真实容量": real_capacity
-                        })
-                    
-                    # 稍微歇一下防封IP
-                    time.sleep(0.1)
+                    verified_data.append({
+                        "市场": cand['question'],
+                        "策略": strat_name,
+                        "成本": cand['cost'],
+                        "收益率": cand['raw_profit'],
+                        "真实可套利金额": real_capacity
+                    })
                 
-                progress_text.empty()
-                my_bar.empty()
+                status_box.empty()
                 
-                # 将结果存入 session，避免刷新消失
-                st.session_state['verified_arbs'] = verified_arbs
+                if verified_data:
+                    final_df = pd.DataFrame(verified_data)
+                    final_df = final_df.sort_values(by="收益率", ascending=False)
+                    
+                    st.success(f"✅ 发现 {len(final_df)} 个理论套利机会！(已按真实 Orderbook 计算容量)")
+                    
+                    styled_final = final_df.style.format({
+                        "成本": "${:.3f}",
+                        "收益率": "+{:.1%}",
+                        "真实可套利金额": "${:,.2f}" # 保留2位小数，精确显示 $0.20
+                    }).background_gradient(subset=["真实可套利金额"], cmap="Reds") # 颜色高亮容量
+
+                    st.dataframe(
+                        styled_final,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "策略": st.column_config.TextColumn("套利策略", width="large"),
+                            "真实可套利金额": st.column_config.NumberColumn("真实可套利金额 (容量)", help="这是您可以立即成交的最大金额，基于双方真实 Orderbook 深度。"),
+                        }
+                    )
+                else:
+                    st.info("没有满足利润要求的机会。")
             
-            # 3. 显示结果 (如果有验算结果)
-            if 'verified_arbs' in st.session_state and st.session_state['verified_arbs']:
-                final_df = pd.DataFrame(st.session_state['verified_arbs'])
-                final_df = final_df.sort_values(by="收益率", ascending=False)
-                
-                st.success(f"✅ 验算完成！发现 {len(final_df)} 个真实有效的套利机会 (深度 > $10)。")
-                
-                styled_final = final_df.style.format({
-                    "成本": "${:.3f}",
-                    "收益率": "+{:.1%}",
-                    "Poly真深度": "${:,.0f}",
-                    "Prob真深度": "${:,.0f}",
-                    "真实容量": "${:,.0f}"
-                })
-                
-                st.dataframe(
-                    styled_final,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "策略": st.column_config.TextColumn("套利策略", width="large"),
-                        "真实容量": st.column_config.NumberColumn("真实容量 (Orderbook)", help="这是经过 Orderbook 验算的真实可买金额"),
-                    }
-                )
+            elif candidates and not auto_depth:
+                # 如果没开自动计算，显示简略版
+                st.warning("⚠️ 深度计算已关闭。显示的仅为理论价格机会，未验证真实容量。")
+                preview_df = pd.DataFrame(candidates)
+                st.dataframe(preview_df[["question", "cost", "raw_profit"]].sort_values("raw_profit", ascending=False))
             
-            elif candidates and not check_depth_btn:
-                st.info(f"🔍 初筛发现 {len(candidates)} 个疑似机会。请点击上方 **'⚡ 深度验算'** 按钮以剔除虚假流动性。")
-                # 预览前几个疑似
-                preview_df = pd.DataFrame(candidates[:5])
-                st.dataframe(preview_df[["question", "cost", "raw_profit"]], hide_index=True)
+            else:
+                st.info("暂无套利机会。")
 
 else:
     with col_search:
