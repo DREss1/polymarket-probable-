@@ -398,4 +398,8 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
             st.warning(f"🤷‍♂️ 在当前 {min_profit}% 利润要求下，未发现套利机会。")
 
 else:
+    # 这就是报错的地方 (Line 401)
     with col_search:
+        # 必须加上这一行缩进的代码
+        st.info("👈 请点击右侧的 '刷新数据' 按钮开始全量抓取。")
+
