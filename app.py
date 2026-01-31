@@ -78,7 +78,7 @@ def get_probable_prices_batch(token_ids):
             print(f"Probable 价格获取失败: {e}")
     return results
 
-# --- 核心逻辑：加载并处理数据 + 套利计算 ---
+# --- 核心逻辑：加载数据 (只负责抓取和存原始数据) ---
 def load_and_process_data():
     status_text = st.empty()
     progress_bar = st.progress(0)
@@ -106,7 +106,7 @@ def load_and_process_data():
         if not common_questions:
             st.warning("没有找到名称完全相同的市场")
             st.session_state.master_df = pd.DataFrame()
-            st.session_state.arb_df = pd.DataFrame()
+            st.session_state.raw_arb_data = [] # 清空原始数据
         else:
             status_text.text(f"Step 3/3: 正在同步 {len(common_questions)} 个市场的实时价格...")
             
@@ -127,13 +127,13 @@ def load_and_process_data():
             progress_bar.progress(90)
 
             rows_data = [] 
-            arb_opportunities = [] 
+            raw_arb_data = [] # 新增：用于存储原始浮点数数据，方便后续动态计算
 
             for q in common_questions:
                 poly_m = poly_dict[q]
                 prob_m = prob_dict[q]
 
-                # --- 1. 获取并清洗 Polymarket 数据 ---
+                # --- Polymarket ---
                 raw_prices = poly_m.get("outcomePrices", [])
                 if isinstance(raw_prices, str):
                     try: prices = json.loads(raw_prices)
@@ -152,7 +152,7 @@ def load_and_process_data():
                 poly_vol = safe_float(poly_m.get("volume24hr", 0))
                 if poly_vol == 0: poly_vol = safe_float(poly_m.get("volume", 0))
 
-                # --- 2. 获取并清洗 Probable 数据 ---
+                # --- Probable ---
                 prob_ids = prob_token_map.get(q, {})
                 id_yes = prob_ids.get("Yes")
                 id_no = prob_ids.get("No")
@@ -170,7 +170,7 @@ def load_and_process_data():
                 prob_liq = safe_float(prob_m.get("liquidity", 0))
                 prob_vol = safe_float(prob_m.get("volume24hr", 0))
 
-                # --- 3. 填充主表数据 ---
+                # --- 1. 填充主展示表 ---
                 rows_data.append([
                     poly_m["question"],
                     poly_price_str, prob_price_str,
@@ -178,38 +178,19 @@ def load_and_process_data():
                     prob_liq, prob_vol
                 ])
 
-                # --- 4. 套利检测逻辑 ---
-                if poly_p_yes > 0 and prob_p_no > 0:
-                    cost_a = poly_p_yes + prob_p_no
-                    if cost_a < 0.99: 
-                        profit_pct = (1 - cost_a) / cost_a
-                        max_cap = min(poly_liq, prob_liq)
-                        arb_opportunities.append({
-                            "市场": poly_m["question"],
-                            "策略": "🔵Poly(Yes) + 🟠Prob(No)",
-                            "成本": cost_a,
-                            "收益率": profit_pct,
-                            "Poly池": poly_liq,
-                            "Prob池": prob_liq,
-                            "理论容量": max_cap
-                        })
+                # --- 2. 存储原始数据 (用于动态套利计算) ---
+                if poly_p_yes > 0 or poly_p_no > 0: # 只存有效数据
+                    raw_arb_data.append({
+                        "question": poly_m["question"],
+                        "poly_yes": poly_p_yes,
+                        "poly_no": poly_p_no,
+                        "prob_yes": prob_p_yes,
+                        "prob_no": prob_p_no,
+                        "poly_liq": poly_liq,
+                        "prob_liq": prob_liq
+                    })
 
-                if poly_p_no > 0 and prob_p_yes > 0:
-                    cost_b = poly_p_no + prob_p_yes
-                    if cost_b < 0.99:
-                        profit_pct = (1 - cost_b) / cost_b
-                        max_cap = min(poly_liq, prob_liq)
-                        arb_opportunities.append({
-                            "市场": poly_m["question"],
-                            "策略": "🔵Poly(No) + 🟠Prob(Yes)",
-                            "成本": cost_b,
-                            "收益率": profit_pct,
-                            "Poly池": poly_liq,
-                            "Prob池": prob_liq,
-                            "理论容量": max_cap
-                        })
-
-            # --- 保存数据 ---
+            # 保存主展示表
             columns = pd.MultiIndex.from_tuples([
                 ("市场信息", "市场名称"),
                 ("价格 (Yes/No)", "Polymarket"),
@@ -220,13 +201,11 @@ def load_and_process_data():
                 ("Probable 资金数据", "24h 成交量 ($)")
             ])
             st.session_state.master_df = pd.DataFrame(rows_data, columns=columns)
-
-            if arb_opportunities:
-                st.session_state.arb_df = pd.DataFrame(arb_opportunities)
-            else:
-                st.session_state.arb_df = pd.DataFrame()
             
-            status_text.success(f"数据加载完成！发现 {len(common_questions)} 个市场，其中 {len(arb_opportunities)} 个套利机会。")
+            # 保存原始数据到 Session State
+            st.session_state.raw_arb_data = raw_arb_data
+            
+            status_text.success(f"数据加载完成！共找到 {len(common_questions)} 个相同市场。")
             progress_bar.empty()
             
     except Exception as e:
@@ -268,7 +247,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     else:
         filtered_df = df.copy()
 
-    # --- 2. 主数据表 ---
+    # --- 2. 主数据表展示 ---
     format_cols = [
         ("Polymarket 资金数据", "流动性 ($)"),
         ("Polymarket 资金数据", "24h 成交量 ($)"),
@@ -285,20 +264,70 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据 (共 {len(df)} 条)")
 
     # ==========================================
-    # 🚀 套利机会监测 (已修复 Crash 问题)
+    # 🚀 套利机会监测 (动态阈值版)
     # ==========================================
     st.markdown("---") 
     
     with st.container(border=True):
-        st.subheader("🚀 套利机会扫描 (Arbitrage Opportunities)")
+        col_title, col_slider = st.columns([2, 1])
+        with col_title:
+            st.subheader("🚀 套利机会扫描 (Arbitrage Opportunities)")
         
-        if 'arb_df' in st.session_state and not st.session_state.arb_df.empty:
-            arb_df = st.session_state.arb_df.copy()
+        # --- 新增功能：阈值设置滑块 ---
+        with col_slider:
+            min_profit = st.slider(
+                "设置最小套利利润率 (%)", 
+                min_value=0.0, 
+                max_value=20.0, 
+                value=1.0, 
+                step=0.1,
+                help="过滤掉利润低于此值的机会。例如 1.0% 意味着两边总成本需低于 $0.99"
+            )
+        
+        # 动态计算逻辑
+        arb_opportunities = []
+        if 'raw_arb_data' in st.session_state and st.session_state.raw_arb_data:
+            threshold_cost = 1.0 - (min_profit / 100.0)
+            
+            for item in st.session_state.raw_arb_data:
+                # 策略 A
+                if item['poly_yes'] > 0 and item['prob_no'] > 0:
+                    cost_a = item['poly_yes'] + item['prob_no']
+                    if cost_a < threshold_cost:
+                        profit_pct = (1 - cost_a) / cost_a
+                        max_cap = min(item['poly_liq'], item['prob_liq'])
+                        arb_opportunities.append({
+                            "市场": item['question'],
+                            "策略": "🔵Poly(Yes) + 🟠Prob(No)",
+                            "成本": cost_a,
+                            "收益率": profit_pct,
+                            "Poly池": item['poly_liq'],
+                            "Prob池": item['prob_liq'],
+                            "理论容量": max_cap
+                        })
+                # 策略 B
+                if item['poly_no'] > 0 and item['prob_yes'] > 0:
+                    cost_b = item['poly_no'] + item['prob_yes']
+                    if cost_b < threshold_cost:
+                        profit_pct = (1 - cost_b) / cost_b
+                        max_cap = min(item['poly_liq'], item['prob_liq'])
+                        arb_opportunities.append({
+                            "市场": item['question'],
+                            "策略": "🔵Poly(No) + 🟠Prob(Yes)",
+                            "成本": cost_b,
+                            "收益率": profit_pct,
+                            "Poly池": item['poly_liq'],
+                            "Prob池": item['prob_liq'],
+                            "理论容量": max_cap
+                        })
+
+        if arb_opportunities:
+            arb_df = pd.DataFrame(arb_opportunities)
             arb_df = arb_df.sort_values(by="收益率", ascending=False)
             
-            st.info(f"💡 发现 {len(arb_df)} 个潜在套利机会！(阈值：总成本 < $0.99)")
+            st.info(f"💡 在 {min_profit}% 利润门槛下，发现 {len(arb_df)} 个套利机会！(总成本 < ${threshold_cost:.3f})")
             
-            # --- 修复点：移除了 background_gradient 和 bar ---
+            # 使用基础 Pandas Styler (不含 matplotlib 依赖)
             styled_arb = arb_df.style.format({
                 "成本": "${:.3f}",
                 "收益率": "+{:.1%}",
@@ -313,13 +342,11 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                 hide_index=True,
                 column_config={
                     "策略": st.column_config.TextColumn("套利策略", help="如何操作：在哪个平台买Yes，哪个买No"),
-                    "理论容量": st.column_config.NumberColumn("理论可套利金额 (容量)", help="受限于两边市场中流动性较小的一方"),
+                    "理论容量": st.column_config.NumberColumn("理论容量 (基于流动性)", help="受限于两边市场中流动性较小的一方"),
                 }
             )
-            st.caption("⚠️ 风险提示：'理论容量' 基于流动性池估算。")
-            
         else:
-            st.success("✅ 当前暂无明显的无风险套利机会 (所有组合成本均 > $0.99)")
+            st.warning(f"🤷‍♂️ 在当前 {min_profit}% 利润要求下，未发现套利机会。试着调低一点阈值？")
 
 else:
     with col_search:
