@@ -17,6 +17,10 @@ def safe_float(val):
     except:
         return 0.0
 
+# --- 回调函数：用于一键清空搜索框 ---
+def clear_selection():
+    st.session_state["market_select"] = None
+
 # --- 1. 获取 Polymarket 数据 ---
 @st.cache_data(ttl=600)
 def get_poly_markets():
@@ -153,7 +157,7 @@ def load_and_process_data():
                     prob_price_str = f"{pr_yes:.1%} / {pr_no:.1%}"
                 except: prob_price_str = "N/A"
 
-                # --- 3. 流动性与成交量 (修复错位核心：安全转换) ---
+                # --- 3. 流动性与成交量 ---
                 prob_liq = safe_float(prob_m.get("liquidity", 0))
                 prob_vol = safe_float(prob_m.get("volume24hr", 0))
 
@@ -165,7 +169,7 @@ def load_and_process_data():
                     "Prob 24h量": prob_vol
                 })
 
-            # --- 修复错位核心：强制指定列顺序，防止列错乱 ---
+            # 强制指定列顺序
             cols_order = ["市场名称", "Poly 价格 (Y/N)", "Prob 价格 (Y/N)", "Prob 流动性", "Prob 24h量"]
             st.session_state.master_df = pd.DataFrame(rows, columns=cols_order)
             
@@ -177,11 +181,10 @@ def load_and_process_data():
 
 # --- 主界面布局 ---
 
-# 布局优化：搜索框在左(大)，按钮在右(小)
-col_search, col_btn = st.columns([4, 1], gap="small")
+# 布局优化：搜索框 + 两个按钮（刷新、重置）
+col_search, col_reset, col_refresh = st.columns([5, 1, 1], gap="small")
 
-with col_btn:
-    # 增加空行让按钮下沉，对齐搜索框
+with col_refresh:
     st.write("") 
     st.write("") 
     if st.button("🔄 刷新全量数据", type="primary", use_container_width=True):
@@ -192,42 +195,52 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     df = st.session_state.master_df
     
     with col_search:
-        # 修复：label_visibility="visible"，增加 help 提示
         market_options = df["市场名称"].tolist()
+        # 增加 key="market_select" 以便回调函数可以清空它
         selected_market = st.selectbox(
             "🔍 搜索/筛选市场 (输入关键词自动联想)", 
             options=market_options,
             index=None,
-            placeholder="输入例如 'Trump' 或 'Bitcoin'...",
-            help="在这里输入关键词，下方表格会自动定位到对应市场。点击右侧 'x' 可清除筛选。"
+            key="market_select",
+            placeholder="输入关键词...",
+            help="输入关键词定位特定市场。"
         )
 
-    # 筛选逻辑
+    # 解决问题1：增加一个独立的清空按钮
+    with col_reset:
+        st.write("")
+        st.write("")
+        # 这个按钮点击后会触发 clear_selection 函数，把搜索框置为 None
+        st.button("❌ 重置筛选", on_click=clear_selection, use_container_width=True, help="点击这里一键清空搜索框")
+
+    # 解决问题2：如果 selected_market 为空，则 filtered_df = df (显示全部)
     if selected_market:
-        filtered_df = df[df["市场名称"] == selected_market]
+        filtered_df = df[df["市场名称"] == selected_market].copy() # 使用 copy 避免样式警告
         st.info(f"📍 已定位: {selected_market}")
     else:
-        filtered_df = df
+        filtered_df = df.copy() # 显示全部
+
+    # 解决问题3：使用 Pandas Styler 强制左对齐
+    # 这一步将数字格式化为字符串 "$1,234" 并设置 CSS text-align: left
+    styled_df = filtered_df.style.format({
+        "Prob 流动性": "${:,.0f}",
+        "Prob 24h量": "${:,.0f}"
+    }).set_properties(
+        subset=["Prob 流动性", "Prob 24h量"], 
+        **{'text-align': 'left'} # 强制左对齐！
+    )
 
     # 表格展示
     st.dataframe(
-        filtered_df, 
+        styled_df, 
         use_container_width=True, 
         hide_index=True,
-        column_config={
-            "Prob 流动性": st.column_config.NumberColumn(
-                "Prob 流动性", format="$%d", help="Probable 市场的当前流动性"
-            ),
-            "Prob 24h量": st.column_config.NumberColumn(
-                "Prob 24h量", format="$%d", help="过去 24 小时的成交量"
-            ),
-        }
+        # 注意：使用 style 后 column_config 的某些功能可能会被覆盖，
+        # 但我们为了对齐，优先使用 style。
     )
     
-    # 底部统计
-    st.caption(f"📊 当前显示 {len(filtered_df)} 条数据 (共 {len(df)} 条) | 数据来源: Polymarket & Probable API")
+    st.caption(f"📊 当前显示 {len(filtered_df)} 条数据 (共 {len(df)} 条)")
 
 else:
-    # 初始状态提示
     with col_search:
         st.info("👈 请点击右侧的 '刷新全量数据' 按钮开始抓取。")
