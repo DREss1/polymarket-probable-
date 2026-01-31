@@ -19,12 +19,10 @@ HEADERS = {
     "Origin": "https://probable.markets"
 }
 
-# --- 0. 初始化 Session State (缓存层) ---
+# --- 0. 初始化 Session State ---
 if 'stats_poly_count' not in st.session_state: st.session_state['stats_poly_count'] = 0
 if 'stats_prob_count' not in st.session_state: st.session_state['stats_prob_count'] = 0
 if 'stats_match_count' not in st.session_state: st.session_state['stats_match_count'] = 0
-
-# 🔥 新增：深度数据缓存池，防止滑块拖动时重复请求
 if 'depth_cache' not in st.session_state: st.session_state['depth_cache'] = {}
 
 # ==========================================
@@ -113,20 +111,16 @@ def get_probable_prices_batch(token_ids):
             pass
     return results
 
-# --- 4. 真实深度计算函数 (带智能缓存) ---
+# --- 4. 真实深度计算函数 (带缓存) ---
 def calculate_arb_capacity(poly_id, prob_id):
-    # 1. 生成唯一缓存键
     cache_key = f"{poly_id}_{prob_id}"
-    
-    # 2. 如果内存里已经算过了，直接返回，不再请求网络！
     if cache_key in st.session_state['depth_cache']:
         return st.session_state['depth_cache'][cache_key]
 
-    # 3. 没算过，开始请求
     capacity_poly = 0.0
     capacity_prob = 0.0
     
-    # Polymarket Depth
+    # 1. Polymarket
     try:
         url = f"https://clob.polymarket.com/book?token_id={poly_id}"
         resp = requests.get(url, headers=HEADERS, timeout=3)
@@ -143,7 +137,7 @@ def calculate_arb_capacity(poly_id, prob_id):
                         capacity_poly += p * s
     except: pass
 
-    # Probable Depth
+    # 2. Probable
     try:
         url = f"https://api.probable.markets/public/api/v1/book?token_id={prob_id}"
         resp = requests.get(url, headers=HEADERS, timeout=3)
@@ -161,17 +155,12 @@ def calculate_arb_capacity(poly_id, prob_id):
     except: pass
     
     real_cap = min(capacity_poly, capacity_prob)
-    
-    # 4. 存入缓存
     st.session_state['depth_cache'][cache_key] = real_cap
-    
     return real_cap
 
 # --- 核心逻辑 ---
 def load_and_process_data():
-    # 刷新时清空深度缓存，确保数据新鲜
-    st.session_state['depth_cache'] = {}
-    
+    st.session_state['depth_cache'] = {} # 刷新时重置深度缓存
     status_text = st.empty()
     progress_bar = st.progress(0)
     
@@ -204,27 +193,25 @@ def load_and_process_data():
             poly_token_map = {} 
 
             for q in common_questions:
+                # Probable ID
                 prob_m = prob_dict[q]
                 p_outcomes = parse_outcomes(prob_m.get("outcomes"))
                 p_tokens = prob_m.get("tokens", [])
-                
                 p_yes = next((t["token_id"] for t in p_tokens if t.get("outcome") == "Yes"), None)
                 p_no = next((t["token_id"] for t in p_tokens if t.get("outcome") == "No"), None)
-                
                 prob_token_map[q] = {"Yes": p_yes, "No": p_no, "Outcomes": p_outcomes}
                 if p_yes: all_tokens_to_fetch.append(p_yes)
                 if p_no: all_tokens_to_fetch.append(p_no)
 
+                # Polymarket ID
                 poly_m = poly_dict[q]
                 poly_clob_ids = []
                 if "clobTokenIds" in poly_m:
                     raw_ids = poly_m["clobTokenIds"]
                     poly_clob_ids = json.loads(raw_ids) if isinstance(raw_ids, str) else raw_ids
-                
                 poly_outcomes = parse_outcomes(poly_m.get("outcomes"))
                 poly_yes_id = None
                 poly_no_id = None
-                
                 if len(poly_clob_ids) == len(poly_outcomes):
                     for idx, out_name in enumerate(poly_outcomes):
                         if out_name == "Yes": poly_yes_id = poly_clob_ids[idx]
@@ -232,7 +219,6 @@ def load_and_process_data():
                 elif len(poly_clob_ids) >= 2:
                     poly_yes_id = poly_clob_ids[0]
                     poly_no_id = poly_clob_ids[1]
-                    
                 poly_token_map[q] = {"Yes": poly_yes_id, "No": poly_no_id}
             
             price_data = get_probable_prices_batch(all_tokens_to_fetch)
@@ -330,7 +316,7 @@ col_search, col_reset, col_refresh = st.columns([5, 1, 1], gap="small")
 with col_refresh:
     st.write("") 
     st.write("") 
-    if st.button("🔄 刷新数据 (并清空缓存)", type="primary", use_container_width=True):
+    if st.button("🔄 刷新数据", type="primary", use_container_width=True):
         load_and_process_data()
 
 if 'master_df' in st.session_state and not st.session_state.master_df.empty:
@@ -373,17 +359,21 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据")
 
     # ==========================================
-    # 🚀 套利机会监测 (带智能缓存版)
+    # 🚀 套利机会监测 (修复容量 < $1 隐藏问题)
     # ==========================================
     st.markdown("---") 
     
     with st.container(border=True):
         st.subheader("🚀 套利机会扫描 (Arbitrage)")
         
-        c1, c2 = st.columns([2, 1])
+        # 布局：滑块 + 开关
+        c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
-            min_profit = st.slider("💰 最小利润率 (%) - 设置为 0 可查看所有机会", 0.0, 50.0, 0.0, 0.1)
+            min_profit = st.slider("💰 最小利润率 (%)", 0.0, 50.0, 0.0, 0.1)
         with c2:
+            # 新增：允许用户控制最小容量过滤，默认为 0
+            min_cap_filter = st.slider("💧 最小套利容量过滤 ($)", 0.0, 100.0, 0.0, 1.0, help="如果设为0，则显示所有机会（包括只有几分钱深度的）")
+        with c3:
             st.write("")
             st.write("")
             auto_depth = st.toggle("⚡ 自动计算真实套利容量 (Auto-Calc Depth)", value=False)
@@ -428,26 +418,23 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                     })
             else:
                 status_box = st.empty()
-                # 按照利润排序
                 sorted_candidates = sorted(candidates, key=lambda x: x['raw_profit'], reverse=True)
-                
                 total_c = len(sorted_candidates)
                 
-                # 提示信息
+                # 提示
                 cache_size = len(st.session_state.get('depth_cache', {}))
-                st.caption(f"💾 已缓存深度数据: {cache_size} 条 (已缓存的市场将瞬间加载)")
+                st.caption(f"💾 已缓存深度数据: {cache_size} 条")
 
                 for idx, cand in enumerate(sorted_candidates):
-                    # 动态显示进度，如果是缓存命中则非常快
                     status_box.text(f"正在验算深度 ({idx+1}/{total_c}): {cand['question']}...")
                     
                     poly_side_id = cand['poly_yes_id'] if cand['strat'] == 'A' else cand['poly_no_id']
                     prob_side_id = cand['prob_no_id'] if cand['strat'] == 'A' else cand['prob_yes_id']
                     
-                    # 这里调用带缓存的函数
                     real_capacity = calculate_arb_capacity(poly_side_id, prob_side_id)
                     
-                    if real_capacity > 1.0: 
+                    # 修改：使用用户设定的滑块值，不再硬编码 > 1.0
+                    if real_capacity > min_cap_filter: 
                         final_data.append({
                             "市场": cand['question'],
                             "策略": cand['strategy_name'],
@@ -486,7 +473,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                 )
             else:
                 if auto_depth:
-                    st.warning("🤷‍♂️ 未发现有效套利机会 (所有理论机会的真实深度均小于 $1)。")
+                    st.warning(f"🤷‍♂️ 未发现有效套利机会 (可能所有机会的深度都小于 ${min_cap_filter})。")
                 else:
                     st.info("暂无理论套利机会。")
 
