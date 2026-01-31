@@ -8,6 +8,25 @@ st.set_page_config(page_title="Polymarket vs Probable 市场对比", page_icon="
 st.title("Polymarket vs Probable 相同市场名称对比工具")
 st.markdown("显示名称完全相同的市场，并附带双边价格、流动性与成交量对比")
 
+# --- 0. 初始化统计数据的 Session State (关键修复：保证仪表盘始终可见) ---
+if 'stats_poly_count' not in st.session_state:
+    st.session_state['stats_poly_count'] = 0
+if 'stats_prob_count' not in st.session_state:
+    st.session_state['stats_prob_count'] = 0
+if 'stats_match_count' not in st.session_state:
+    st.session_state['stats_match_count'] = 0
+
+# ==========================================
+# 📊 顶部常驻仪表盘 (直接显示，不再隐藏)
+# ==========================================
+# 使用容器包裹，增加背景色或边框让它更显眼
+with st.container(border=True):
+    col_m1, col_m2, col_m3 = st.columns(3)
+    # 这里直接读取 Session State，确保随时有数
+    col_m1.metric("🔵 Polymarket 活跃市场扫描", st.session_state['stats_poly_count'], help="本次扫描到的 Polymarket 活跃市场总数")
+    col_m2.metric("🟠 Probable 活跃市场扫描", st.session_state['stats_prob_count'], help="本次扫描到的 Probable 活跃市场总数")
+    col_m3.metric("🔗 成功匹配相同市场", st.session_state['stats_match_count'], help="两个平台名称完全一致的市场数量")
+
 # --- 辅助函数：安全转换浮点数 ---
 def safe_float(val):
     try:
@@ -84,18 +103,16 @@ def load_and_process_data():
     progress_bar = st.progress(0)
     
     try:
-        # Step 1
+        # Step 1: 扫描 Poly
         status_text.text("Step 1/3: 正在扫描 Polymarket 活跃市场...")
         poly = get_poly_markets()
-        # 存储统计数据
-        st.session_state['stats_poly_count'] = len(poly)
+        st.session_state['stats_poly_count'] = len(poly) # 更新统计
         progress_bar.progress(33)
         
-        # Step 2
+        # Step 2: 扫描 Prob
         status_text.text("Step 2/3: 正在扫描 Probable 活跃市场...")
         prob = get_probable_markets()
-        # 存储统计数据
-        st.session_state['stats_prob_count'] = len(prob)
+        st.session_state['stats_prob_count'] = len(prob) # 更新统计
         progress_bar.progress(66)
 
         if not poly or not prob:
@@ -107,8 +124,10 @@ def load_and_process_data():
         prob_dict = {m["question"].strip().lower(): m for m in prob if "question" in m}
         common_questions = sorted(set(poly_dict.keys()) & set(prob_dict.keys()))
         
-        # 存储匹配统计
-        st.session_state['stats_match_count'] = len(common_questions)
+        st.session_state['stats_match_count'] = len(common_questions) # 更新统计
+
+        # 强制刷新页面以显示最新的顶部数字 (可选，但在 Streamlit 中通常由 rerun 触发)
+        # 这里我们依靠下面的 UI 渲染更新，或者用户下次交互更新
 
         if not common_questions:
             st.warning("没有找到名称完全相同的市场")
@@ -213,22 +232,14 @@ def load_and_process_data():
             status_text.success(f"数据加载完成！")
             progress_bar.empty()
             
+            # 触发一次 Rerun 以立即更新顶部的数字
+            st.rerun()
+
     except Exception as e:
         st.error(f"发生错误: {e}")
 
 # --- 主界面 UI ---
 
-# ==========================================
-# 📊 1. 数据概览仪表盘 (新增功能)
-# ==========================================
-if 'stats_poly_count' in st.session_state:
-    col_m1, col_m2, col_m3 = st.columns(3)
-    col_m1.metric("🔵 Polymarket 活跃市场数", st.session_state['stats_poly_count'])
-    col_m2.metric("🟠 Probable 活跃市场数", st.session_state['stats_prob_count'])
-    col_m3.metric("🔗 成功匹配相同市场", st.session_state['stats_match_count'])
-    st.divider() # 加一条分割线更美观
-
-# 2. 控制区
 col_search, col_reset, col_refresh = st.columns([5, 1, 1], gap="small")
 
 with col_refresh:
