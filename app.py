@@ -125,65 +125,66 @@ def load_and_process_data():
             price_data = get_probable_prices_batch(all_tokens_to_fetch)
             progress_bar.progress(90)
 
-            rows = []
+            rows_data = [] 
             for q in common_questions:
                 poly_m = poly_dict[q]
                 prob_m = prob_dict[q]
 
-                # --- 1. Polymarket 价格 & 数据 ---
-                poly_price_str = "N/A"
+                # --- Polymarket 基础数据 ---
                 raw_prices = poly_m.get("outcomePrices", [])
                 if isinstance(raw_prices, str):
                     try: prices = json.loads(raw_prices)
                     except: prices = []
                 else: prices = raw_prices
-                
                 try:
                     p_yes = float(prices[0]) if len(prices) > 0 else 0
                     p_no = float(prices[1]) if len(prices) > 1 else 0
                     poly_price_str = f"{p_yes:.1%} / {p_no:.1%}"
                 except: poly_price_str = "Err"
-
+                
                 poly_liq = safe_float(poly_m.get("liquidity", 0))
-                # 优先取 volume24hr，没有则取 volume (防止为0)
                 poly_vol = safe_float(poly_m.get("volume24hr", 0))
-                if poly_vol == 0:
-                     poly_vol = safe_float(poly_m.get("volume", 0))
+                if poly_vol == 0: poly_vol = safe_float(poly_m.get("volume", 0))
 
-                # --- 2. Probable 价格 ---
+                # --- Probable 基础数据 ---
                 prob_ids = prob_token_map.get(q, {})
                 id_yes = prob_ids.get("Yes")
                 id_no = prob_ids.get("No")
                 prob_price_yes = price_data.get(id_yes, {}).get("BUY", "0") if id_yes else "0"
                 prob_price_no = price_data.get(id_no, {}).get("BUY", "0") if id_no else "0"
-                
                 try:
                     pr_yes = float(prob_price_yes)
                     pr_no = float(prob_price_no)
                     prob_price_str = f"{pr_yes:.1%} / {pr_no:.1%}"
                 except: prob_price_str = "N/A"
-
-                # --- 3. Probable 数据 ---
+                
                 prob_liq = safe_float(prob_m.get("liquidity", 0))
                 prob_vol = safe_float(prob_m.get("volume24hr", 0))
 
-                rows.append({
-                    "市场名称": poly_m["question"],
-                    "Poly 价格 (Y/N)": poly_price_str,
-                    "Poly 流动性": poly_liq,
-                    "Poly 24h量": poly_vol,
-                    "Prob 价格 (Y/N)": prob_price_str,
-                    "Prob 流动性": prob_liq,
-                    "Prob 24h量": prob_vol
-                })
+                # --- 数据填充顺序修改 ---
+                # 按照：市场 -> 价格(Poly) -> 价格(Prob) -> [Poly数据: 流动性, 量] -> [Prob数据: 流动性, 量]
+                rows_data.append([
+                    poly_m["question"],
+                    poly_price_str, 
+                    prob_price_str,
+                    poly_liq, 
+                    poly_vol,
+                    prob_liq, 
+                    prob_vol
+                ])
 
-            # 指定列顺序
-            cols_order = [
-                "市场名称", 
-                "Poly 价格 (Y/N)", "Poly 流动性", "Poly 24h量",
-                "Prob 价格 (Y/N)", "Prob 流动性", "Prob 24h量"
-            ]
-            st.session_state.master_df = pd.DataFrame(rows, columns=cols_order)
+            # --- 核心修改：调整表头分组逻辑 ---
+            columns = pd.MultiIndex.from_tuples([
+                ("市场信息", "市场名称"),
+                ("价格 (Yes/No)", "Polymarket"),
+                ("价格 (Yes/No)", "Probable"),
+                ("Polymarket 资金数据", "流动性 ($)"),     # 分组：Poly
+                ("Polymarket 资金数据", "24h 成交量 ($)"), # 分组：Poly
+                ("Probable 资金数据", "流动性 ($)"),       # 分组：Prob
+                ("Probable 资金数据", "24h 成交量 ($)")    # 分组：Prob
+            ])
+            
+            st.session_state.master_df = pd.DataFrame(rows_data, columns=columns)
             
             status_text.success(f"数据加载完成！共找到 {len(common_questions)} 个相同市场。")
             progress_bar.empty()
@@ -204,13 +205,15 @@ with col_refresh:
 if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     df = st.session_state.master_df
     
+    market_col_key = ("市场信息", "市场名称")
+    
     with col_search:
-        market_options = df["市场名称"].tolist()
+        market_options = df[market_col_key].tolist()
         selected_market = st.selectbox(
             "🔍 搜索/筛选市场 (输入关键词自动联想)", 
             options=market_options,
             index=None,
-            key="market_select", # 绑定 Key 用于清空
+            key="market_select",
             placeholder="输入关键词...",
             help="在这里输入关键词，下方表格会自动定位到对应市场。"
         )
@@ -218,31 +221,30 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     with col_reset:
         st.write("")
         st.write("")
-        # 【解决问题1】使用按钮回调来清空搜索框
-        st.button("❌ 重置筛选", on_click=clear_selection, use_container_width=True, help="点击这里一键清空搜索框")
+        st.button("❌ 重置筛选", on_click=clear_selection, use_container_width=True)
 
-    # 【解决问题2】如果搜索框为空，则显示全部数据 (df.copy())
     if selected_market:
-        filtered_df = df[df["市场名称"] == selected_market].copy()
+        filtered_df = df[df[market_col_key] == selected_market].copy()
         st.info(f"📍 已定位: {selected_market}")
     else:
         filtered_df = df.copy()
 
-    # 【解决问题3】使用 Styler 强制居中对齐 (Center Align)
-    # 居中是标题和数字视觉上最不容易错位的方案
-    align_cols = ["Poly 流动性", "Poly 24h量", "Prob 流动性", "Prob 24h量"]
+    # --- 样式调整 ---
+    # 需要对齐的列名列表（注意这里必须与 MultiIndex 完全匹配）
+    format_cols = [
+        ("Polymarket 资金数据", "流动性 ($)"),
+        ("Polymarket 资金数据", "24h 成交量 ($)"),
+        ("Probable 资金数据", "流动性 ($)"),
+        ("Probable 资金数据", "24h 成交量 ($)")
+    ]
     
-    styled_df = filtered_df.style.format({
-        "Poly 流动性": "${:,.0f}",
-        "Poly 24h量": "${:,.0f}",
-        "Prob 流动性": "${:,.0f}",
-        "Prob 24h量": "${:,.0f}"
-    }).set_properties(
-        subset=align_cols, 
-        **{'text-align': 'center'} # 核心修改：强制居中
+    format_dict = {col: "${:,.0f}" for col in format_cols}
+    
+    styled_df = filtered_df.style.format(format_dict).set_properties(
+        subset=format_cols, 
+        **{'text-align': 'center'}
     ).set_table_styles([
-        # 尝试强制表头也居中 (Streamlit 有时会覆盖这个，但值得一试)
-        {'selector': 'th', 'props': [('text-align', 'center')]}
+        {'selector': 'th', 'props': [('text-align', 'center'), ('vertical-align', 'middle')]}
     ])
 
     st.dataframe(
