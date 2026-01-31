@@ -28,20 +28,32 @@ with st.container(border=True):
 # --- 辅助函数 ---
 def safe_float(val):
     try:
-        if val is None or val == "":
-            return 0.0
+        if val is None or val == "": return 0.0
         return float(val)
-    except:
-        return 0.0
+    except: return 0.0
 
 def clear_selection():
     st.session_state["market_select"] = None
 
-# --- 1. 获取 Polymarket 数据 (无限制版) ---
+def parse_outcomes(outcomes_str):
+    """解析 outcomes 字段，如果失败则返回默认的 Yes/No"""
+    default = ["Yes", "No"]
+    if not outcomes_str: return default
+    try:
+        if isinstance(outcomes_str, str):
+            data = json.loads(outcomes_str)
+            if isinstance(data, list) and len(data) >= 2:
+                return data
+        elif isinstance(outcomes_str, list) and len(outcomes_str) >= 2:
+            return outcomes_str
+    except:
+        pass
+    return default
+
+# --- 1. 获取 Polymarket 数据 ---
 @st.cache_data(ttl=600)
 def get_poly_markets():
     url = "https://gamma-api.polymarket.com/markets"
-    # 保持 active=true，确保只抓活跃市场
     params = {"active": "true", "closed": "false", "limit": 500}
     markets = []
     offset = 0
@@ -53,15 +65,11 @@ def get_poly_markets():
             if not data: break
             markets.extend(data)
             offset += 500
-            
-            # 【核心修改】：移除了 if offset > 5000: break
-            # 现在会一直抓取直到 data 为空
-            
     except Exception as e:
         st.error(f"Polymarket 数据拉取失败: {e}")
     return markets
 
-# --- 2. 获取 Probable 市场列表 (无限制版) ---
+# --- 2. 获取 Probable 市场列表 ---
 @st.cache_data(ttl=600)
 def get_probable_markets():
     url = "https://market-api.probable.markets/public/api/v1/markets/"
@@ -76,10 +84,6 @@ def get_probable_markets():
             if not new: break
             markets.extend(new)
             page += 1
-            
-            # 【核心修改】：移除了 if page > 50: break
-            # 现在会一直翻页直到没有新数据
-            
     except Exception as e:
         st.error(f"Probable 列表拉取失败: {e}")
     return markets
@@ -101,14 +105,14 @@ def get_probable_prices_batch(token_ids):
             print(f"Probable 价格获取失败: {e}")
     return results
 
-# --- 核心逻辑：加载并处理数据 ---
+# --- 核心逻辑 ---
 def load_and_process_data():
     status_text = st.empty()
     progress_bar = st.progress(0)
     
     try:
         # Step 1: 扫描 Poly
-        status_text.text("Step 1/3: 正在扫描 Polymarket 全量活跃市场 (可能需要1-2分钟)...")
+        status_text.text("Step 1/3: 正在扫描 Polymarket 全量活跃市场...")
         poly = get_poly_markets()
         st.session_state['stats_poly_count'] = len(poly)
         progress_bar.progress(33)
@@ -143,9 +147,17 @@ def load_and_process_data():
             for q in common_questions:
                 prob_m = prob_dict[q]
                 tokens = prob_m.get("tokens", [])
+                
+                # 尝试获取 Probable 的 outcomes 列表，用于判断 Yes/No 对应的真实含义
+                # Probable 的 API 通常把 outcomes 存在 'outcomes' 字段
+                prob_outcomes = parse_outcomes(prob_m.get("outcomes"))
+                
+                # 假设 tokens[0] 对应 outcomes[0] (通常是 "Yes" 对应第一个选项)
                 yes_token = next((t["token_id"] for t in tokens if t.get("outcome") == "Yes"), None)
                 no_token = next((t["token_id"] for t in tokens if t.get("outcome") == "No"), None)
-                prob_token_map[q] = {"Yes": yes_token, "No": no_token}
+                
+                prob_token_map[q] = {"Yes": yes_token, "No": no_token, "Outcomes": prob_outcomes}
+                
                 if yes_token: all_tokens_to_fetch.append(yes_token)
                 if no_token: all_tokens_to_fetch.append(no_token)
             
@@ -160,7 +172,13 @@ def load_and_process_data():
                 poly_m = poly_dict[q]
                 prob_m = prob_dict[q]
 
-                # --- Polymarket ---
+                # --- 1. 获取并解析选项名称 (关键步骤) ---
+                # 优先使用 Polymarket 的 outcomes，因为通常格式更规范
+                outcomes_list = parse_outcomes(poly_m.get("outcomes"))
+                outcome_a_name = outcomes_list[0] # 对应 Yes / Token 0
+                outcome_b_name = outcomes_list[1] # 对应 No / Token 1
+
+                # --- 2. Polymarket 数据 ---
                 raw_prices = poly_m.get("outcomePrices", [])
                 if isinstance(raw_prices, str):
                     try: prices = json.loads(raw_prices)
@@ -170,7 +188,8 @@ def load_and_process_data():
                 try:
                     poly_p_yes = float(prices[0]) if len(prices) > 0 else 0.0
                     poly_p_no = float(prices[1]) if len(prices) > 1 else 0.0
-                    poly_price_str = f"{poly_p_yes:.1%} / {poly_p_no:.1%}"
+                    # 使用真实选项名称显示
+                    poly_price_str = f"{outcome_a_name}: {poly_p_yes:.1%} / {outcome_b_name}: {poly_p_no:.1%}"
                 except: 
                     poly_p_yes, poly_p_no = 0.0, 0.0
                     poly_price_str = "Err"
@@ -179,17 +198,19 @@ def load_and_process_data():
                 poly_vol = safe_float(poly_m.get("volume24hr", 0))
                 if poly_vol == 0: poly_vol = safe_float(poly_m.get("volume", 0))
 
-                # --- Probable ---
-                prob_ids = prob_token_map.get(q, {})
-                id_yes = prob_ids.get("Yes")
-                id_no = prob_ids.get("No")
+                # --- 3. Probable 数据 ---
+                prob_info = prob_token_map.get(q, {})
+                id_yes = prob_info.get("Yes")
+                id_no = prob_info.get("No")
+                
                 prob_raw_yes = price_data.get(id_yes, {}).get("BUY", "0") if id_yes else "0"
                 prob_raw_no = price_data.get(id_no, {}).get("BUY", "0") if id_no else "0"
                 
                 try:
                     prob_p_yes = float(prob_raw_yes)
                     prob_p_no = float(prob_raw_no)
-                    prob_price_str = f"{prob_p_yes:.1%} / {prob_p_no:.1%}"
+                    # 使用真实选项名称显示
+                    prob_price_str = f"{outcome_a_name}: {prob_p_yes:.1%} / {outcome_b_name}: {prob_p_no:.1%}"
                 except: 
                     prob_p_yes, prob_p_no = 0.0, 0.0
                     prob_price_str = "N/A"
@@ -205,14 +226,16 @@ def load_and_process_data():
                     prob_liq, prob_vol
                 ])
 
-                # 存储原始数据
+                # --- 4. 存储原始数据 (带选项名称) ---
                 if poly_p_yes > 0 or poly_p_no > 0: 
                     raw_arb_data.append({
                         "question": poly_m["question"],
-                        "poly_yes": poly_p_yes,
-                        "poly_no": poly_p_no,
-                        "prob_yes": prob_p_yes,
-                        "prob_no": prob_p_no,
+                        "outcome_a": outcome_a_name, # 存入选项 A 名字 (如 Trump)
+                        "outcome_b": outcome_b_name, # 存入选项 B 名字 (如 Harris)
+                        "poly_yes": poly_p_yes, # Price of A on Poly
+                        "poly_no": poly_p_no,   # Price of B on Poly
+                        "prob_yes": prob_p_yes, # Price of A on Prob (Token Yes)
+                        "prob_no": prob_p_no,   # Price of B on Prob (Token No)
                         "poly_liq": poly_liq,
                         "prob_liq": prob_liq
                     })
@@ -220,8 +243,8 @@ def load_and_process_data():
             # 保存主表
             columns = pd.MultiIndex.from_tuples([
                 ("市场信息", "市场名称"),
-                ("价格 (Yes/No)", "Polymarket"),
-                ("价格 (Yes/No)", "Probable"),
+                ("价格详情 (Outcome A / Outcome B)", "Polymarket"),
+                ("价格详情 (Outcome A / Outcome B)", "Probable"),
                 ("Polymarket 资金数据", "流动性 ($)"),
                 ("Polymarket 资金数据", "24h 成交量 ($)"),
                 ("Probable 资金数据", "流动性 ($)"),
@@ -230,9 +253,8 @@ def load_and_process_data():
             st.session_state.master_df = pd.DataFrame(rows_data, columns=columns)
             st.session_state.raw_arb_data = raw_arb_data
             
-            status_text.success(f"全量数据扫描完成！")
+            status_text.success(f"数据加载完成！")
             progress_bar.empty()
-            
             st.rerun()
 
     except Exception as e:
@@ -291,7 +313,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
     st.caption(f"📊 当前显示 {len(filtered_df)} 条数据 (共 {len(df)} 条)")
 
     # ==========================================
-    # 🚀 套利机会监测 (动态阈值版)
+    # 🚀 5. 套利机会监测 (智能选项版)
     # ==========================================
     st.markdown("---") 
     
@@ -314,7 +336,11 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
             threshold_cost = 1.0 - (min_profit / 100.0)
             
             for item in st.session_state.raw_arb_data:
-                # 策略 A
+                # 获取真实选项名称
+                name_a = item['outcome_a']
+                name_b = item['outcome_b']
+
+                # 策略 A: Poly买A + Prob买B
                 if item['poly_yes'] > 0 and item['prob_no'] > 0:
                     cost_a = item['poly_yes'] + item['prob_no']
                     if cost_a < threshold_cost:
@@ -322,14 +348,14 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                         max_cap = min(item['poly_liq'], item['prob_liq'])
                         arb_opportunities.append({
                             "市场": item['question'],
-                            "策略": "🔵Poly(Yes) + 🟠Prob(No)",
+                            "策略": f"🔵Poly({name_a}) + 🟠Prob({name_b})", # 智能显示名称
                             "成本": cost_a,
                             "收益率": profit_pct,
                             "Poly池": item['poly_liq'],
                             "Prob池": item['prob_liq'],
                             "理论容量": max_cap
                         })
-                # 策略 B
+                # 策略 B: Poly买B + Prob买A
                 if item['poly_no'] > 0 and item['prob_yes'] > 0:
                     cost_b = item['poly_no'] + item['prob_yes']
                     if cost_b < threshold_cost:
@@ -337,7 +363,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                         max_cap = min(item['poly_liq'], item['prob_liq'])
                         arb_opportunities.append({
                             "市场": item['question'],
-                            "策略": "🔵Poly(No) + 🟠Prob(Yes)",
+                            "策略": f"🔵Poly({name_b}) + 🟠Prob({name_a})", # 智能显示名称
                             "成本": cost_b,
                             "收益率": profit_pct,
                             "Poly池": item['poly_liq'],
@@ -349,7 +375,7 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
             arb_df = pd.DataFrame(arb_opportunities)
             arb_df = arb_df.sort_values(by="收益率", ascending=False)
             
-            st.info(f"💡 在 {min_profit}% 利润门槛下，发现 {len(arb_df)} 个套利机会！(总成本 < ${threshold_cost:.3f})")
+            st.info(f"💡 在 {min_profit}% 利润门槛下，发现 {len(arb_df)} 个套利机会！")
             
             styled_arb = arb_df.style.format({
                 "成本": "${:.3f}",
@@ -364,13 +390,12 @@ if 'master_df' in st.session_state and not st.session_state.master_df.empty:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "策略": st.column_config.TextColumn("套利策略", help="如何操作：在哪个平台买Yes，哪个买No"),
-                    "理论容量": st.column_config.NumberColumn("理论容量 (基于流动性)", help="受限于两边市场中流动性较小的一方"),
+                    "策略": st.column_config.TextColumn("套利策略", width="large", help="显示具体的买入选项"),
+                    "理论容量": st.column_config.NumberColumn("理论容量", help="受限于两边市场中流动性较小的一方"),
                 }
             )
         else:
-            st.warning(f"🤷‍♂️ 在当前 {min_profit}% 利润要求下，未发现套利机会。试着调低一点阈值？")
+            st.warning(f"🤷‍♂️ 在当前 {min_profit}% 利润要求下，未发现套利机会。")
 
 else:
     with col_search:
-        st.info("👈 请点击右侧的 '刷新数据' 按钮开始全量抓取。")
